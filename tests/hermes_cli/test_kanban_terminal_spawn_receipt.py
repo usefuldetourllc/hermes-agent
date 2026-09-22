@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 import time
+import traceback
 
 import pytest
 
@@ -32,6 +33,7 @@ def test_original_terminal_result_survives_launch_receipt_without_releasing_live
     children = []
     launches = []
     hooks = []
+    callback_errors = []
     monkeypatch.setattr(kb, '_kanban_observer_consumed', lambda name: True)
     monkeypatch.setattr(kb, '_fire_kanban_lifecycle_hook', lambda *args, **kwargs: hooks.append((args, kwargs)))
     expected_status = {'complete': 'done', 'block': 'blocked', 'review': 'review', 'changes': 'ready', 'schedule': 'scheduled'}[transition]
@@ -48,7 +50,9 @@ with kbc.connect_closing() as conn:
     elif action=='review': result=kb.request_review(conn,task,summary='finished',reviewer='reviewer',**kwargs)
     elif action=='schedule': result=kb.schedule_task(conn,task,reason='wait',**kwargs)
     else: result=kb.request_changes(conn,task,reason='fix finding',**kwargs)[0]
-    Path(path).write_text(json.dumps({'accepted':result}))
+    staged=Path(path).with_suffix('.pending')
+    staged.write_text(json.dumps({'accepted':result}))
+    staged.replace(path)
 sys.stdin.read(1)
 '''
     def spawn(task, workspace, *, board=None):
@@ -76,12 +80,30 @@ sys.stdin.read(1)
         if receipt == 'error':
             raise TypeError('late receipt lost after accepted terminal result')
         return None if receipt == 'none' else child.pid
+    def spawn_with_diagnostics(task, workspace, *, board=None):
+        try:
+            return spawn(task, workspace, board=board)
+        except Exception as exc:
+            callback_errors.append({'type': type(exc).__name__, 'error': str(exc),
+                                    'traceback': traceback.format_exc(),
+                                    'worker_output': output.read_text() if output.exists() else None})
+            raise
     try:
         with kbc.connect_closing() as conn:
             task_id = kb.create_task(conn, title='early result', assignee='fixture', priority=10)
             if transition == 'changes':
                 assert kb.request_review(conn, task_id, summary='implementation', reviewer='fixture')
-            first = dispatch.dispatch_once(conn, spawn_fn=spawn, **options)
+            first = dispatch.dispatch_once(conn, spawn_fn=spawn_with_diagnostics, **options)
+            expected_error = receipt == 'error'
+            if callback_errors and (not expected_error or callback_errors[-1]['type'] != 'TypeError'
+                                    or callback_errors[-1]['error'] != 'late receipt lost after accepted terminal result'):
+                pytest.fail(json.dumps(callback_errors, indent=2))
+            if bool(first.spawned) is expected_error:
+                evidence = {'callback_errors': callback_errors,
+                            'task': dict(conn.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone()),
+                            'runs': [dict(r) for r in conn.execute('SELECT * FROM task_runs WHERE task_id=?', (task_id,))],
+                            'events': [dict(r) for r in conn.execute('SELECT * FROM task_events WHERE task_id=?', (task_id,))]}
+                pytest.fail(json.dumps(evidence, indent=2))
             run_id = launches[0][1]
             task = kb.get_task(conn, task_id)
             run = conn.execute('SELECT * FROM task_runs WHERE id=?', (run_id,)).fetchone()
