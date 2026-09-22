@@ -38,3 +38,24 @@ def test_dispatch_does_not_repeat_callback_after_process_was_started(tmp_path, m
     assert not result.spawned
     assert len(runs) == 1
     assert len(launches) == 1, f'One original run launched multiple processes: {launches}'
+
+
+@pytest.mark.parametrize('shape', ['legacy', 'board', 'opaque_type', 'opaque_value'])
+def test_spawn_signature_compatibility_invokes_once(shape):
+    calls = []
+    task = object()
+    def legacy(value, workspace):
+        calls.append((value, workspace))
+        return 123
+    def board(value, workspace, *, board=None):
+        calls.append((value, workspace, board))
+        return 123
+    class Opaque:
+        @property
+        def __signature__(self):
+            raise (TypeError if shape == 'opaque_type' else ValueError)('signature unavailable')
+        def __call__(self, value, workspace):
+            return legacy(value, workspace)
+    callback = legacy if shape == 'legacy' else board if shape == 'board' else Opaque()
+    assert kbd._call_spawn_fn(callback, task, '/workspace', 'selected-board') == 123
+    assert calls == [(task, '/workspace', 'selected-board') if shape == 'board' else (task, '/workspace')]

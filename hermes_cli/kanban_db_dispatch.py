@@ -1797,11 +1797,13 @@ def _call_spawn_fn(spawn_fn, task: Task, workspace: str, board: Optional[str]) -
     import inspect
     try:
         sig = inspect.signature(spawn_fn)
-        if "board" in sig.parameters:
-            return spawn_fn(task, workspace, board=board)
-        return spawn_fn(task, workspace)
     except (TypeError, ValueError):
-        return spawn_fn(task, workspace)
+        kwargs = {}
+    else:
+        kwargs = {"board": board} if "board" in sig.parameters else {}
+    # Compatibility applies to signature discovery only. Once invoked, the
+    # callback may have spawned a worker even if it raises before returning.
+    return spawn_fn(task, workspace, **kwargs)
 
 
 def _dispatch_lane_task(
