@@ -108,8 +108,17 @@ def _profile_worker_entry(task_json, profile, home):
         raise RuntimeError('worker profile loading requires dropped privilege')
     from hermes_cli.kanban_db import Task
     from hermes_cli.kanban_db_dispatch import _worker_argv
-    command = _worker_argv(Task(**json.loads(task_json)), profile, home)
+    command = _worker_argv(Task(**json.loads(task_json)), profile, home, isolated_source=True)
     os.execvpe(command[0], command, os.environ)
+
+
+def _cli_worker_entry(arguments):
+    """Keep the verified source root across exec, independent of cwd/install state."""
+    import runpy
+    if os.geteuid() == 0:
+        raise RuntimeError('worker CLI loading requires dropped privilege')
+    sys.argv = [str(Path(__file__).with_name('main.py')), *arguments]
+    runpy.run_module('hermes_cli.main', run_name='__main__')
 
 
 def supervise(db_path, task_id, run_id, claim_lock, scope_id, argv, worker_env=None):
@@ -174,6 +183,8 @@ if __name__ == '__main__':
     # Script execution works from an arbitrary native workspace without relying
     # on PYTHONPATH or a globally installed copy of Hermes.
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    if sys.argv[1] == '--cli-worker':
+        raise SystemExit(_cli_worker_entry(sys.argv[2:]))
     if sys.argv[1] == '--profile-worker':
         raise SystemExit(_profile_worker_entry(*sys.argv[2:]))
     if sys.argv[1] == '--worker':

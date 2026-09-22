@@ -2480,7 +2480,7 @@ def _retag_legacy_worker_sessions(workspaces_root_path: str) -> None:
         _kb._log.debug("kanban worker: legacy session retag skipped (%s)", exc)
 
 
-def _worker_argv(task: Task, profile_arg: str, hermes_home: Optional[str]) -> list[str]:
+def _worker_argv(task: Task, profile_arg: str, hermes_home: Optional[str], *, isolated_source: bool = False) -> list[str]:
     """Build the ``hermes -p <profile> --cli ... chat -q ...`` worker command."""
     from hermes_cli.kanban_execution_authority import current as execution_authority
     if sys.platform == 'linux' and os.geteuid() == 0 and execution_authority() is not None:
@@ -2488,8 +2488,10 @@ def _worker_argv(task: Task, profile_arg: str, hermes_home: Optional[str]) -> li
         # Defer profile/config/plugin access to a fresh unprivileged process.
         return [sys.executable, '-I', str(Path(__file__).with_name('kanban_execution_supervisor.py')),
                 '--profile-worker', json.dumps(asdict(task)), profile_arg, str(hermes_home)]
+    executable = ([sys.executable, '-I', str(Path(__file__).with_name('kanban_execution_supervisor.py')),
+                   '--cli-worker'] if isolated_source else _resolve_hermes_argv())
     cmd = [
-        *_resolve_hermes_argv(),
+        *executable,
         "-p", profile_arg,
         # A worker must NEVER boot the interactive TUI: its no-TTY bail-out
         # exits 0 without doing the task → "protocol violation" every attempt.

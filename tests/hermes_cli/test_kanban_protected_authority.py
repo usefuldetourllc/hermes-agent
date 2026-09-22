@@ -187,6 +187,36 @@ while not Path(sys.argv[3]).exists() and time.monotonic()<until:time.sleep(.02)
 
 
 @pytest.mark.linux_only
+def test_protected_real_cli_bootstrap_uses_candidate_from_external_workspace(protected_board):
+    home,public,authority,worker = protected_board
+    workspace = public/'external-workspace';workspace.mkdir(mode=0o755)
+    # A cwd-local package must not replace the root-verified Hermes source.
+    decoy = workspace/'hermes_cli';decoy.mkdir()
+    (decoy/'__init__.py').write_text("raise RuntimeError('untrusted workspace package imported')")
+    with kbc.connect_closing() as conn:
+        task_id = kb.create_task(conn,title='real CLI bootstrap',assignee='fixture',
+                                workspace_kind='dir',workspace_path=str(workspace),
+                                skills=['--bootstrap-probe-invalid'],max_runtime_seconds=30)
+        # No command/spawn replacement. The deliberately invalid skills option
+        # reaches the actual CLI parser and exits before any agent/provider run.
+        dispatch.dispatch_once(conn,max_in_progress=1)
+        task = kb.get_task(conn,task_id)
+        log_path = kb.worker_logs_dir()/f'{task_id}.log'
+        try:
+            wait_for(lambda:scopes.settled(conn,task.current_run_id),timeout=25)
+            scope = authority.read(conn,task.current_run_id)
+            output = log_path.read_text(errors='replace')
+            assert scope['returncode']==2,output
+            assert 'expected one argument' in output,output
+            assert 'No module named' not in output and 'untrusted workspace package imported' not in output,output
+            assert scope['children_reaped'] and not authority.pending(conn,task_id)
+        finally:
+            if log_path.exists():print('REAL_CLI_BOOTSTRAP_OUTPUT='+log_path.read_text(errors='replace'),flush=True)
+            scopes.request_task_stop(conn,task_id)
+            wait_for(lambda:scopes.settled(conn,task.current_run_id),timeout=10)
+
+
+@pytest.mark.linux_only
 def test_protected_owner_rejects_alternate_callback_and_config_change(protected_board):
     home,public,authority,worker=protected_board
     with kbc.connect_closing() as conn:
