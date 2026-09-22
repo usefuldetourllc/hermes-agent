@@ -86,10 +86,12 @@ while not Path(sys.argv[3]).exists() and time.monotonic()<until:time.sleep(.02)
 '''
     cmd=[sys.executable,'-c',source,str(Path(kb.__file__).resolve().parents[1]),str(go),str(release),str(publication),str(authority.directory),case]
     monkeypatch.setattr(dispatch,'_worker_argv',lambda *args:cmd)
-    launched=[];real_popen=dispatch.subprocess.Popen
+    launched=[];worker_logs=[];real_popen=dispatch.subprocess.Popen
     def popen(argv,**kwargs):
         proc=real_popen(argv,**kwargs)
-        if 'kanban_execution_supervisor.py' in str(argv):launched.append(proc)
+        if 'kanban_execution_supervisor.py' in str(argv):
+            launched.append(proc)
+            worker_logs.append(Path(kwargs['stdout'].name))
         return proc
     monkeypatch.setattr(dispatch.subprocess,'Popen',popen)
     worker_pid=worker_fingerprint=None
@@ -130,6 +132,24 @@ while not Path(sys.argv[3]).exists() and time.monotonic()<until:time.sleep(.02)
                 assert authority.read(conn,run)['deadline']==original['deadline']
                 assert ownership.reconcile(conn,task_id)
                 assert not authority.pending(conn,task_id)
+    except BaseException:
+        # The canonical runner deletes its per-file temp tree on exit. Emit
+        # synthetic worker diagnostics now, without masking the original failure.
+        try:
+            with kbc.connect_closing() as conn:
+                records = authority.pending(conn)
+                scopes_at_failure = [dict(row) for row in conn.execute(
+                    'SELECT id,execution_scope FROM task_runs')]
+            print('PROTECTED_WORKER_DIAGNOSTICS=' + json.dumps({
+                'case': case,
+                'supervisors': [{'pid': proc.pid, 'returncode': proc.poll()} for proc in launched],
+                'private_pending': records,
+                'public_scopes': scopes_at_failure,
+                'worker_logs': {str(path): path.read_text(errors='replace')[-16000:] for path in worker_logs},
+            }), flush=True)
+        except Exception as diagnostic_error:
+            print(f'PROTECTED_WORKER_DIAGNOSTICS_ERROR={diagnostic_error!r}', flush=True)
+        raise
     finally:
         go.touch();release.touch()
         for proc in launched:
