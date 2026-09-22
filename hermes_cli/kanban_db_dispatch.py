@@ -1694,14 +1694,18 @@ def count_running_tasks(conn: sqlite3.Connection) -> int:
     host-level budget — the memory-derived cap bounds the machine, not the
     board. Fails open to 0 so a broken board doesn't brick dispatch on healthy ones.
     """
+    from hermes_cli.kanban_execution_authority import current as execution_authority
+    authority = execution_authority()
+    protected_count = len(authority.pending(conn)) if authority is not None else 0
     try:
         from hermes_cli.kanban_spawn_ownership import extra_occupancy
-        return int(
+        return max(protected_count, int(
             conn.execute(
                 "SELECT COUNT(*) FROM tasks WHERE status = 'running'"
             ).fetchone()[0]
-        ) + len(extra_occupancy(conn))
+        ) + len(extra_occupancy(conn)))
     except Exception:
+        if authority is not None: raise
         return 0
 
 
@@ -2129,6 +2133,10 @@ def _dispatch_once_locked(
     call ``spawn_fn(task, workspace_path, board) -> Optional[int]``, recording
     the PID so later ticks catch crashes before the TTL. Cap semantics:
     :func:`_tick_spawn_budget`."""
+    from hermes_cli.kanban_execution_authority import current as execution_authority
+    authority = execution_authority()
+    if authority is not None and spawn_fn is not None:
+        raise RuntimeError('protected execution cannot use an unowned spawn callback')
     result = DispatchResult()
     _run_reclaim_phase(
         conn, result, stale_timeout_seconds=stale_timeout_seconds,
@@ -2668,8 +2676,25 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None, e
     env.pop("HERMES_TUI", None)
 
     cmd = _worker_argv(task, profile_arg, env.get("HERMES_HOME"))
+    protected_fd = None
+    supervisor_env = env
+    supervisor_cwd = workspace if os.path.isdir(workspace) else None
     if execution_scope is not None:
-        cmd = [sys.executable, str(Path(__file__).with_name('kanban_execution_supervisor.py')),
+        from hermes_cli.kanban_execution_authority import current as execution_authority
+        authority = execution_authority()
+        authority_args = []
+        if authority is not None:
+            from hermes_cli.kanban_execution_authority import environment_fd, privileged_environment, verify_runtime, protected_path
+            verify_runtime()
+            if profile_home is None:
+                raise RuntimeError('protected execution requires an installed worker profile')
+            protected_path(Path(profile_home))
+            protected_path(Path(profile_home)/'config.yaml')
+            protected_fd = environment_fd(env)
+            supervisor_env = privileged_environment()
+            supervisor_cwd = str(authority.directory)
+            authority_args = ['--authority', json.dumps(authority.policy), '--environment-fd', str(protected_fd)]
+        cmd = [sys.executable, *(['-I'] if authority is not None else []), str(Path(__file__).with_name('kanban_execution_supervisor.py')), *authority_args,
                env['HERMES_KANBAN_DB'], task.id, str(task.current_run_id), task.claim_lock, execution_scope['id'], *cmd]
     # A worker spawned by a managed systemd gateway must leave the gateway's
     # cgroup before startup; otherwise restarting the service kills the worker
@@ -2677,15 +2702,17 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None, e
     cmd = _restart_safe_worker_argv(task, cmd)
     from tools.process_registry import systemd_user_bus_env
     env = systemd_user_bus_env(env)
+    if protected_fd is None: supervisor_env = env
     log_f = _open_worker_log(task, board)
     try:
         proc = subprocess.Popen(  # noqa: S603 -- argv is a fixed list built above
             cmd,
-            cwd=workspace if os.path.isdir(workspace) else None,
+            cwd=supervisor_cwd,
             stdin=subprocess.DEVNULL,
             stdout=log_f,
             stderr=subprocess.STDOUT,
-            env=env,
+            env=supervisor_env,
+            **({'pass_fds': (protected_fd,)} if protected_fd is not None else {}),
             start_new_session=True,
             creationflags=subprocess.CREATE_NO_WINDOW if _kb._IS_WINDOWS else 0,
         )
@@ -2695,6 +2722,8 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None, e
             "`hermes` executable not found on PATH. "
             "Install Hermes Agent or activate its venv before running the kanban dispatcher."
         )
+    finally:
+        if protected_fd is not None: os.close(protected_fd)
     # Intentionally NOT closing log_f: the child keeps writing after return;
     # the OS-level FD stays open in the child until it exits.
     return proc.pid

@@ -11,17 +11,25 @@ import os
 import signal
 import time
 
+from hermes_cli import kanban_execution_authority as protected
+
 CONTRACT = 'linux-child-subreaper-v1'
 
 
 def read(conn, run_id):
+    authority = protected.current()
+    if authority is not None:
+        original = authority.read(conn, run_id)
+        if original is not None: return original
     row = conn.execute('SELECT execution_scope FROM task_runs WHERE id=?', (run_id,)).fetchone()
     return json.loads(row['execution_scope']) if row and row['execution_scope'] else None
 
 
 def settled(conn, run_id):
     scope = read(conn, run_id)
-    return bool(scope and scope.get('contract') == CONTRACT and scope.get('state') == 'settled'
+    if scope and scope.get('contract') == protected.CONTRACT and protected.current() is None:
+        return False
+    return bool(scope and scope.get('contract') in {CONTRACT, protected.CONTRACT} and scope.get('state') == 'settled'
                 and scope.get('children_reaped') is True and scope.get('supervisor_fingerprint'))
 
 
@@ -68,6 +76,8 @@ def prepare(conn, task, *, deadline=None):
             raise ValueError('finite absolute execution deadline required')
         scope = {'contract':CONTRACT, 'id':secrets.token_hex(24), 'state':'prepared',
                  'deadline':deadline, 'prepared_at':time.time()}
+        authority = protected.current()
+        if authority is not None: scope = authority.prepare(conn, task, scope)
         conn.execute('UPDATE task_runs SET execution_scope=? WHERE id=?', (json.dumps(scope), task.current_run_id))
         return scope
 
@@ -81,7 +91,12 @@ def activate(conn, task_id, run_id, claim_lock, scope_id, pid, fingerprint):
                 or row['spawn_state'] not in {'attempted','receipted','uncertain'}
                 or not scope or scope['id'] != scope_id or scope['state'] != 'prepared' or not fingerprint):
             raise RuntimeError('original execution scope cannot be replayed')
+        if pid != os.getpid():
+            raise RuntimeError('supervisor activation requires the original calling process')
+        original = dict(scope)
         scope.update(state='active', supervisor_pid=pid, supervisor_fingerprint=fingerprint)
+        authority = protected.current()
+        if authority is not None: authority.update(conn, run_id, original, scope)
         conn.execute('UPDATE task_runs SET execution_scope=? WHERE id=?', (json.dumps(scope), run_id))
         return scope
 
@@ -96,18 +111,35 @@ def bind_worker(conn, run_id, scope_id, supervisor_pid, supervisor_fingerprint, 
                 or scope['supervisor_fingerprint'] != supervisor_fingerprint
                 or scope.get('worker_pid') is not None or not worker_fingerprint):
             raise RuntimeError('original execution worker cannot be replaced')
+        if supervisor_pid != os.getpid():
+            raise RuntimeError('worker binding requires the original supervisor process')
+        original = dict(scope)
         scope.update(worker_pid=worker_pid, worker_fingerprint=worker_fingerprint)
+        authority = protected.current()
+        if authority is not None: authority.update(conn, run_id, original, scope)
         conn.execute('UPDATE task_runs SET execution_scope=? WHERE id=?', (json.dumps(scope), run_id))
 
 
 def finish(conn, run_id, scope_id, pid, fingerprint, *, reason, returncode):
     """Called by the still-live owning supervisor after kernel ECHILD proof."""
     from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_dispatch import _process_fingerprint
+    if os.getpid() != pid or _process_fingerprint(pid) != fingerprint:
+        raise RuntimeError('cleanup requires the original calling supervisor')
+    try:
+        os.waitid(os.P_ALL, 0, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    except ChildProcessError:
+        pass
+    else:
+        raise RuntimeError('cleanup requires kernel proof that every child was reaped')
     with kb.write_txn(conn):
         scope = read(conn, run_id)
         if (not scope or scope['id'] != scope_id or scope['state'] != 'active'
                 or scope['supervisor_pid'] != pid or scope['supervisor_fingerprint'] != fingerprint):
             raise RuntimeError('execution cleanup owner changed')
+        original = dict(scope)
         scope.update(state='settled', children_reaped=True, finished_at=time.time(),
                      reason=reason, returncode=returncode)
+        authority = protected.current()
+        if authority is not None: authority.update(conn, run_id, original, scope)
         conn.execute('UPDATE task_runs SET execution_scope=? WHERE id=?', (json.dumps(scope), run_id))

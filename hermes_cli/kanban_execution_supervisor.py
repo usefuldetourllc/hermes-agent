@@ -45,17 +45,22 @@ def _signal_children(sig):
             pass
 
 
-def _launch_worker(conn, run_id, scope, pid, fingerprint, argv, may_launch):
+def _launch_worker(conn, run_id, scope, pid, fingerprint, argv, may_launch, worker_env=None):
     from hermes_cli import kanban_execution_scope as scopes
     from hermes_cli.kanban_db_dispatch import _process_fingerprint
     read_fd, write_fd = os.pipe()
+    env_fd = None
+    if worker_env is not None:
+        from hermes_cli.kanban_execution_authority import environment_fd
+        env_fd = environment_fd(worker_env)
     try:
         # exec preserves this child's PID/start fingerprint. The pipe prevents
         # even an immediate provider rejection racing its durable identity.
         proc = subprocess.Popen(
-            [sys.executable, str(Path(__file__).resolve()), '--worker', str(read_fd),
-             str(scope['deadline']), *argv],
-            stdin=subprocess.DEVNULL, pass_fds=(read_fd,))
+            [sys.executable, *(['-I'] if worker_env is not None else []), str(Path(__file__).resolve()), '--worker', str(read_fd),
+             str(scope['deadline']), *([] if env_fd is None else ['--environment-fd', str(env_fd)]), *argv],
+            stdin=subprocess.DEVNULL, pass_fds=(read_fd,) if env_fd is None else (read_fd,env_fd),
+            **_worker_credentials())
         scopes.bind_worker(conn, run_id, scope['id'], pid, fingerprint,
                            proc.pid, _process_fingerprint(proc.pid))
         if may_launch():
@@ -64,9 +69,22 @@ def _launch_worker(conn, run_id, scope, pid, fingerprint, argv, may_launch):
     finally:
         os.close(read_fd)
         os.close(write_fd)
+        if env_fd is not None: os.close(env_fd)
 
 
-def _worker_entry(read_fd, deadline, argv):
+def _worker_credentials():
+    from hermes_cli.kanban_execution_authority import current
+    authority = current()
+    if authority is None: return {}
+    # Inherit this across the credential drop and every later worker exec.
+    # A setuid binary or file capability must not restore dispatcher privilege.
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(38, 1, 0, 0, 0) or libc.prctl(39, 0, 0, 0, 0) != 1:
+        raise RuntimeError('worker no-new-privileges isolation unavailable')
+    return {'user': authority.policy['worker_uid'], 'group': authority.policy['worker_gid'], 'extra_groups': []}
+
+
+def _worker_entry(read_fd, deadline, argv, env_fd=None):
     try:
         granted = os.read(read_fd, 1) == b'1'
     finally:
@@ -74,10 +92,16 @@ def _worker_entry(read_fd, deadline, argv):
     # DB/pipe startup waits cannot extend the original absolute cutoff.
     if not granted or (deadline is not None and time.time() >= deadline):
         return 1
-    os.execvpe(argv[0], argv, os.environ)
+    env = os.environ
+    if env_fd is not None:
+        from hermes_cli.kanban_execution_authority import read_environment
+        env = read_environment(env_fd)
+        workspace = env.get('TERMINAL_CWD')
+        if workspace and Path(workspace).is_dir(): os.chdir(workspace)
+    os.execvpe(argv[0], argv, env)
 
 
-def supervise(db_path, task_id, run_id, claim_lock, scope_id, argv):
+def supervise(db_path, task_id, run_id, claim_lock, scope_id, argv, worker_env=None):
     from hermes_cli import kanban_db_connect as kbc, kanban_execution_scope as scopes
     from hermes_cli.kanban_db_dispatch import _process_fingerprint
     _subreaper()
@@ -104,7 +128,7 @@ def supervise(db_path, task_id, run_id, claim_lock, scope_id, argv):
                 reason = 'stopped_before_launch' if stopping else 'deadline_before_launch'
             else:
                 proc = _launch_worker(conn, run_id, scope, pid, fingerprint, argv,
-                                      lambda: not stopping and not expired())
+                                      lambda: not stopping and not expired(), worker_env=worker_env)
                 while True:
                     exits, empty = _reap()
                     if proc.pid in exits:
@@ -141,8 +165,25 @@ if __name__ == '__main__':
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     if sys.argv[1] == '--worker':
         _, read_fd, deadline, *command = sys.argv[1:]
-        raise SystemExit(_worker_entry(int(read_fd), None if deadline == 'None' else float(deadline), command))
-    db_path, task_id, run_id, claim_lock, scope_id, *command = sys.argv[1:]
+        env_fd = None
+        if command[0] == '--environment-fd':
+            env_fd = int(command[1]);command = command[2:]
+        raise SystemExit(_worker_entry(int(read_fd), None if deadline == 'None' else float(deadline), command, env_fd=env_fd))
+    arguments = sys.argv[1:]
+    authority = None
+    worker_env = None
+    if arguments[0] == '--authority':
+        import json
+        from hermes_cli.kanban_execution_authority import Authority
+        authority = Authority(json.loads(arguments[1]))
+        arguments = arguments[2:]
+        if arguments[0] != '--environment-fd':
+            raise SystemExit('protected worker environment descriptor required')
+        from hermes_cli.kanban_execution_authority import read_environment
+        worker_env = read_environment(int(arguments[1]));arguments = arguments[2:]
+    db_path, task_id, run_id, claim_lock, scope_id, *command = arguments
     if not command:
         raise SystemExit('native command is required')
-    raise SystemExit(supervise(db_path, task_id, int(run_id), claim_lock, scope_id, command))
+    from hermes_cli.kanban_execution_authority import using
+    with using(authority):
+        raise SystemExit(supervise(db_path, task_id, int(run_id), claim_lock, scope_id, command, worker_env=worker_env))

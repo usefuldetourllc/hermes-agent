@@ -66,10 +66,11 @@ def report_provider_failure(result: dict) -> None:
             return
         if row['execution_scope'] is not None:
             from hermes_cli.kanban_execution_scope import CONTRACT
+            from hermes_cli.kanban_execution_authority import CONTRACT as PROTECTED_CONTRACT
             from hermes_cli.kanban_db_dispatch import _process_fingerprint
             scope = kb._json_dict(row['execution_scope'])
             fingerprint = _process_fingerprint(os.getpid())
-            if (scope.get('contract') != CONTRACT or scope.get('state') != 'active'
+            if (scope.get('contract') not in {CONTRACT, PROTECTED_CONTRACT} or scope.get('state') != 'active'
                     or scope.get('worker_pid') != os.getpid() or not fingerprint
                     or scope.get('worker_fingerprint') != fingerprint):
                 return
@@ -98,8 +99,9 @@ def provider_verdict(conn, task_id: str, pid: int):
     expected_pid = pid
     if row['execution_scope'] is not None:
         from hermes_cli.kanban_execution_scope import CONTRACT
+        from hermes_cli.kanban_execution_authority import CONTRACT as PROTECTED_CONTRACT
         scope = kb._json_dict(row['execution_scope'])
-        if (scope.get('contract') != CONTRACT or scope.get('supervisor_pid') != pid
+        if (scope.get('contract') not in {CONTRACT, PROTECTED_CONTRACT} or scope.get('supervisor_pid') != pid
                 or not scope.get('worker_fingerprint')
                 or evidence.get('scope_id') != scope.get('id')
                 or evidence.get('worker_fingerprint') != scope['worker_fingerprint']):

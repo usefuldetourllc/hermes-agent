@@ -19,6 +19,9 @@ def pending_runs(conn, task_id=None):
 
 
 def pending(conn, task_id):
+    from hermes_cli.kanban_execution_authority import current
+    authority = current()
+    if authority is not None and authority.pending(conn, task_id): return True
     return bool(pending_runs(conn, task_id))
 
 
