@@ -496,6 +496,8 @@ def _reap_terminal_worker_row(conn, row, host_prefix: str, signal_fn, reaped: li
         if not termination["terminated"]:
             return  # still alive: try again next tick
     with _kb.write_txn(conn):
+        from hermes_cli.kanban_spawn_ownership import cleanup_verified
+        cleanup_verified(conn, row['task_id'], row['id'], pid, fingerprint)
         conn.execute(
             "UPDATE task_runs SET worker_pid = NULL, worker_started_at = NULL "
             "WHERE id = ? AND worker_pid = ? AND worker_started_at = ?",
@@ -1369,7 +1371,8 @@ def _record_task_failure(
         return True
 
 
-def _set_worker_pid(conn: sqlite3.Connection, task_id: str, pid: int) -> None:
+def _set_worker_pid(conn: sqlite3.Connection, task_id: str, pid: int, *,
+                    expected_run_id=None, expected_claim_lock=None) -> None:
     """Record the spawned child's pid + its restart-stable fingerprint (``_process_fingerprint``), and
     emit a ``spawned`` event carrying them. The fingerprint is what lets every later liveness/kill
     decision tell OUR worker from a process that recycled the PID after a reboot. A failed capture is
@@ -1377,12 +1380,17 @@ def _set_worker_pid(conn: sqlite3.Connection, task_id: str, pid: int) -> None:
     whose bare-PID kill authority a new spawn must not inherit."""
     started_at = _process_fingerprint(int(pid)) or UNVERIFIED_WORKER_FINGERPRINT
     with _kb.write_txn(conn):
-        conn.execute("UPDATE tasks SET worker_pid = ?, worker_started_at = ? WHERE id = ?",
-                     (int(pid), started_at, task_id))
-        run_id = _kb._current_run_id(conn, task_id)
-        if run_id is not None:
-            conn.execute("UPDATE task_runs SET worker_pid = ?, worker_started_at = ? WHERE id = ?",
-                         (int(pid), started_at, run_id))
+        if expected_run_id is not None:
+            from hermes_cli.kanban_spawn_ownership import record_receipt
+            run_id = expected_run_id
+            record_receipt(conn, task_id, run_id, expected_claim_lock, int(pid), started_at)
+        else:
+            conn.execute("UPDATE tasks SET worker_pid = ?, worker_started_at = ? WHERE id = ?",
+                         (int(pid), started_at, task_id))
+            run_id = _kb._current_run_id(conn, task_id)
+            if run_id is not None:
+                conn.execute("UPDATE task_runs SET worker_pid = ?, worker_started_at = ? WHERE id = ?",
+                             (int(pid), started_at, run_id))
         _kb._append_event(conn, task_id, "spawned", {"pid": int(pid), "started_at": started_at}, run_id=run_id)
 
 
@@ -1672,18 +1680,19 @@ def configured_max_in_progress() -> Optional[int]:
 
 
 def count_running_tasks(conn: sqlite3.Connection) -> int:
-    """Number of tasks in ``status='running'``.
+    """Running tasks plus terminal runs still owning unresolved process capacity.
 
     Used by the multi-board sweep to count OTHER boards' workers against the
     host-level budget — the memory-derived cap bounds the machine, not the
     board. Fails open to 0 so a broken board doesn't brick dispatch on healthy ones.
     """
     try:
+        from hermes_cli.kanban_spawn_ownership import extra_occupancy
         return int(
             conn.execute(
                 "SELECT COUNT(*) FROM tasks WHERE status = 'running'"
             ).fetchone()[0]
-        )
+        ) + len(extra_occupancy(conn))
     except Exception:
         return 0
 
@@ -1908,7 +1917,8 @@ def _dispatch_lane_task(
     try:
         pid = _call_spawn_fn(spawn_fn if spawn_fn is not None else _default_spawn, claimed, str(workspace), board)
         if pid:
-            _set_worker_pid(conn, claimed.id, int(pid))
+            _set_worker_pid(conn, claimed.id, int(pid), expected_run_id=claimed.current_run_id,
+                            expected_claim_lock=claimed.claim_lock)
         else:
             spawn_ownership.returned(conn, claimed)
         # Fires AFTER the PID (when reported) is durably persisted. Best-effort.
@@ -1969,8 +1979,9 @@ def _run_reclaim_phase(
 ) -> None:
     """Reclaim stale/orphaned/crashed/timed-out running tasks, then promote."""
     from hermes_cli.kanban_spawn_ownership import reconcile
-    for row in conn.execute("SELECT id FROM tasks WHERE current_run_id IS NOT NULL").fetchall():
-        reconcile(conn, row['id'])
+    from hermes_cli.kanban_spawn_ownership import pending_runs
+    for task_id in {row["task_id"] for row in pending_runs(conn)}:
+        reconcile(conn, task_id)
     reap_worker_zombies()
     result.reaped_terminal_workers = reap_terminal_workers(conn)
     result.reclaimed = _kb.release_stale_claims(conn, failure_limit=failure_limit)
@@ -2145,6 +2156,11 @@ def _dispatch_once_locked(
             "GROUP BY assignee"
         ):
             per_profile_running[prow["assignee"]] = int(prow["n"])
+        from hermes_cli.kanban_spawn_ownership import extra_occupancy
+        for run in extra_occupancy(conn):
+            profile = run['profile']
+            if profile:
+                per_profile_running[profile] = per_profile_running.get(profile, 0) + 1
     lane_kwargs: dict[str, Any] = dict(
         dry_run=dry_run, ttl_seconds=ttl_seconds, board=board,
         failure_limit=failure_limit, spawn_fn=spawn_fn,

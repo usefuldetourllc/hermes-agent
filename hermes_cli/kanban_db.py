@@ -198,7 +198,7 @@ def _fire_worker_spawned_hook(
     try:
         _fire_kanban_lifecycle_hook(
             "on_kanban_worker_spawned", task.id, board=board or get_current_board(),
-            assignee=task.assignee, run_id=_current_run_id(conn, task.id),
+            assignee=task.assignee, run_id=task.current_run_id,
             worker_pid=int(pid) if pid else None, workspace_path=str(workspace_path),
         )
     except Exception as exc:  # pragma: no cover - defensive
@@ -1917,6 +1917,7 @@ def _append_event(
 def _end_run(
     conn: sqlite3.Connection, task_id: str, *, outcome: str, summary: Optional[str] = None,
     error: Optional[str] = None, metadata: Optional[dict] = None, status: Optional[str] = None,
+    expected_run_id: Optional[int] = None,
 ) -> Optional[int]:
     """Close the active run (``status`` defaults to ``outcome``) and clear
     ``current_run_id``; None when no run was active (never-claimed task).
@@ -1926,7 +1927,7 @@ def _end_run(
     is wiped, and :func:`kanban_db_dispatch.reap_terminal_workers` needs them
     to end a worker that survived its own terminal transition."""
     from hermes_cli.kanban_spawn_ownership import require_resolved
-    require_resolved(conn, task_id)
+    require_resolved(conn, task_id, terminal_run_id=expected_run_id)
     now = int(time.time())
     run_id = _current_run_id(conn, task_id)
     if run_id is None:
@@ -1947,6 +1948,8 @@ def _end_run(
         (status or outcome, outcome, summary, error, _json_or_null(metadata), now, run_id),
     )
     conn.execute("UPDATE tasks SET current_run_id = NULL WHERE id = ?", (task_id,))
+    from hermes_cli.kanban_spawn_ownership import reconcile
+    reconcile(conn, task_id)
     return run_id
 
 
@@ -1985,14 +1988,15 @@ _UNSET: Any = object()
 def _end_or_synthesize_run(
     conn: sqlite3.Connection, task_id: str, *, outcome: str, status: str,
     summary: Optional[str] = None, metadata: Optional[dict] = None, synthesize: bool,
-    profile: Any = _UNSET,
+    profile: Any = _UNSET, expected_run_id: Optional[int] = None,
 ) -> Optional[int]:
     """:func:`_end_run`; when no run was active and ``synthesize`` holds, record a
     zero-duration run instead so the handoff fields survive in attempt history.
     ``profile`` overrides the profile read off the task row for the synthesized
     run — transitions that reassign the task (e.g. review handoff) pass the
     acting profile captured before the rewrite."""
-    run_id = _end_run(conn, task_id, outcome=outcome, status=status, summary=summary, metadata=metadata)
+    run_id = _end_run(conn, task_id, outcome=outcome, status=status, summary=summary, metadata=metadata,
+                      expected_run_id=expected_run_id)
     if run_id is None and synthesize:
         run_id = _synthesize_ended_run(conn, task_id, outcome=outcome, summary=summary, metadata=metadata, profile=profile)
     return run_id
@@ -2226,6 +2230,9 @@ def claim_task(
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     with write_txn(conn):
+        from hermes_cli.kanban_spawn_ownership import pending
+        if pending(conn, task_id):
+            return None
         # Single enforcement point: never ready -> running with an undone
         # parent, whichever writer set 'ready'. Demote to 'todo';
         # recompute_ready re-promotes when the parents finish.
@@ -2259,6 +2266,9 @@ def claim_review_task(
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
     with write_txn(conn):
+        from hermes_cli.kanban_spawn_ownership import pending
+        if pending(conn, task_id):
+            return None
         if not _parents_satisfied(conn, task_id):
             demoted = conn.execute(
                 "UPDATE tasks SET status = 'todo' "
@@ -2741,7 +2751,7 @@ def complete_task(
             _stage_completion_artifacts(conn, task_id, metadata, now)
         run_id = _end_run(
             conn, task_id, outcome="completed", status="done", summary=handoff_summary,
-            metadata=metadata,
+            metadata=metadata, expected_run_id=expected_run_id,
         )
         # Never-claimed task: synthesize a run so the handoff fields survive.
         if run_id is None and (summary or metadata or result or prior_status == "review"):
@@ -3116,6 +3126,7 @@ def block_task(
             return False
         run_id = _end_or_synthesize_run(
             conn, task_id, outcome="blocked", status="blocked", summary=reason, synthesize=bool(reason),
+            expected_run_id=expected_run_id,
         )
         _append_event(conn, task_id, event_kind, payload, run_id=run_id)
         blocked_task = get_task(conn, task_id)
@@ -3264,7 +3275,7 @@ def request_review(
             run_id = _end_or_synthesize_run(
                 conn, task_id, outcome="review_requested", status="review",
                 summary=summary, metadata=metadata, synthesize=bool(summary or metadata),
-                profile=implementer,
+                profile=implementer, expected_run_id=expected_run_id,
             )
             payload: dict = {
                 "summary": _first_line(summary, 400) or None,
@@ -3356,6 +3367,7 @@ def request_changes(
             return False, "task changed during review handoff"
         run_id = _end_run(
             conn, task_id, outcome="changes_requested", status=new_status, summary=reason,
+            expected_run_id=expected_run_id,
         )
         _append_event(
             conn,
@@ -3752,6 +3764,8 @@ def delete_archived_task(conn: sqlite3.Connection, task_id: str) -> bool:
     """Hard-delete an ARCHIVED task (+ related rows); anything else must be
     archived first so data loss takes two deliberate actions."""
     with write_txn(conn):
+        from hermes_cli.kanban_spawn_ownership import require_resolved
+        require_resolved(conn, task_id)
         if _task_status(conn, task_id) != "archived":
             return False
         _delete_task_relations(conn, task_id)
@@ -3762,6 +3776,8 @@ def delete_archived_task(conn: sqlite3.Connection, task_id: str) -> bool:
 def delete_task(conn: sqlite3.Connection, task_id: str) -> bool:
     """Hard-delete a task and its related rows in one txn; False when not found."""
     with write_txn(conn):
+        from hermes_cli.kanban_spawn_ownership import require_resolved
+        require_resolved(conn, task_id)
         cur = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
         if cur.rowcount != 1:
             return False
@@ -3794,6 +3810,7 @@ def schedule_task(
             return False
         run_id = _end_or_synthesize_run(
             conn, task_id, outcome="scheduled", status="scheduled", summary=reason, synthesize=bool(reason),
+            expected_run_id=expected_run_id,
         )
         _append_event(conn, task_id, "scheduled", {"reason": reason}, run_id=run_id)
         return True
