@@ -1,26 +1,20 @@
 """Original-run ownership survives both terminal transitions and launch errors.
 
-A terminal work result and verified process cleanup are different facts. Events
-hold the launch fence on the run even after the task's current-run pointer clears.
+A terminal work result and verified process cleanup are different facts. The run's
+spawn_state holds ownership after its task pointer clears and audit events expire.
 """
 import time
-
-_EVENTS = ('spawn_attempted', 'spawned', 'spawn_returned', 'spawn_uncertain', 'spawn_cleanup_verified')
 
 
 def pending_runs(conn, task_id=None):
     """Unreceipted launches and receipted terminal workers still own capacity."""
     return conn.execute('''SELECT r.*, t.current_run_id, t.status AS task_status,
         t.worker_pid AS task_pid, t.worker_started_at AS task_fingerprint,
-        t.claim_lock AS task_lock, e.kind
+        t.claim_lock AS task_lock
         FROM task_runs r JOIN tasks t ON t.id=r.task_id
-        JOIN task_events e ON e.id=(SELECT MAX(last.id) FROM task_events last
-            WHERE last.task_id=r.task_id AND last.run_id=r.id AND last.kind IN (?,?,?,?,?))
-        WHERE EXISTS (SELECT 1 FROM task_events first
-            WHERE first.task_id=r.task_id AND first.run_id=r.id AND first.kind='spawn_attempted')
-        AND (e.kind IN ('spawn_attempted','spawn_uncertain')
-             OR (e.kind='spawned' AND r.ended_at IS NOT NULL))
-        AND (? IS NULL OR r.task_id=?)''', (*_EVENTS, task_id, task_id)).fetchall()
+        WHERE r.spawn_state IS NOT NULL AND r.spawn_state NOT IN ('returned','settled')
+        AND (r.spawn_state != 'receipted' OR r.ended_at IS NOT NULL)
+        AND (? IS NULL OR r.task_id=?)''', (task_id, task_id)).fetchall()
 
 
 def pending(conn, task_id):
@@ -51,6 +45,11 @@ def begin(conn, task):
         if (not row or row['status'] != 'running' or row['current_run_id'] != task.current_run_id
                 or row['claim_lock'] != task.claim_lock):
             raise RuntimeError('original spawn ownership changed')
+        changed = conn.execute('''UPDATE task_runs SET spawn_state='attempted'
+            WHERE id=? AND task_id=? AND claim_lock IS ? AND spawn_state IS NULL''',
+            (task.current_run_id, task.id, task.claim_lock))
+        if changed.rowcount != 1:
+            raise RuntimeError('original run already entered its spawn callback')
         kb._append_event(conn, task.id, 'spawn_attempted', {'claim_lock': task.claim_lock}, run_id=task.current_run_id)
 
 
@@ -58,6 +57,8 @@ def returned(conn, task):
     """Normal no-PID callbacks retain their existing ownership convention."""
     from hermes_cli import kanban_db as kb
     with kb.write_txn(conn):
+        conn.execute("UPDATE task_runs SET spawn_state='returned' WHERE id=? AND task_id=? AND claim_lock IS ?",
+                     (task.current_run_id, task.id, task.claim_lock))
         kb._append_event(conn, task.id, 'spawn_returned', run_id=task.current_run_id)
 
 
@@ -67,6 +68,8 @@ def uncertain(conn, task, error):
         conn.execute('''UPDATE tasks SET last_failure_error=?
             WHERE id=? AND current_run_id=? AND claim_lock IS ?''',
             ('spawn cleanup unresolved: '+str(error)[:400], task.id, task.current_run_id, task.claim_lock))
+        conn.execute("UPDATE task_runs SET spawn_state='uncertain' WHERE id=? AND task_id=? AND claim_lock IS ?",
+                     (task.current_run_id, task.id, task.claim_lock))
         kb._append_event(conn, task.id, 'spawn_uncertain', {'error': str(error)[:500]}, run_id=task.current_run_id)
 
 
@@ -75,7 +78,7 @@ def record_receipt(conn, task_id, run_id, claim_lock, pid, fingerprint):
     row = conn.execute('SELECT task_id,claim_lock FROM task_runs WHERE id=?', (run_id,)).fetchone()
     if not row or row['task_id'] != task_id or row['claim_lock'] != claim_lock:
         raise RuntimeError('original spawn receipt ownership changed')
-    conn.execute('UPDATE task_runs SET worker_pid=?,worker_started_at=? WHERE id=?', (pid, fingerprint, run_id))
+    conn.execute("UPDATE task_runs SET worker_pid=?,worker_started_at=?,spawn_state='receipted' WHERE id=?", (pid, fingerprint, run_id))
     conn.execute('''UPDATE tasks SET worker_pid=?,worker_started_at=?
         WHERE id=? AND current_run_id=? AND claim_lock IS ?''', (pid, fingerprint, task_id, run_id, claim_lock))
 
@@ -83,6 +86,9 @@ def record_receipt(conn, task_id, run_id, claim_lock, pid, fingerprint):
 def cleanup_verified(conn, task_id, run_id, pid, fingerprint):
     """Record verified process exit before a reaper clears the identity columns."""
     from hermes_cli import kanban_db as kb
+    conn.execute("""UPDATE task_runs SET spawn_state='settled'
+        WHERE id=? AND task_id=? AND worker_pid IS ? AND worker_started_at IS ?
+        AND spawn_state IS NOT NULL""", (run_id, task_id, pid, fingerprint))
     kb._append_event(conn, task_id, 'spawn_cleanup_verified', {
         'pid': pid, 'fingerprint': fingerprint, 'observed_at': int(time.time())}, run_id=run_id)
 

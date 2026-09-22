@@ -1007,6 +1007,9 @@ CREATE TABLE IF NOT EXISTS task_runs (
     -- worker_pid after the run ends so a worker that outlives its terminal transition can
     -- still be found and reaped; NULL = legacy row, never signalled.
     worker_started_at   INTEGER,
+    -- Authoritative launch ownership, independent of prunable audit events.
+    -- NULL = legacy/unattempted; attempted | uncertain | receipted | returned | settled.
+    spawn_state         TEXT,
     max_runtime_seconds INTEGER,
     last_heartbeat_at   INTEGER,
     started_at          INTEGER NOT NULL,
