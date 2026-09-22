@@ -1925,6 +1925,8 @@ def _end_run(
     row: they are the only evidence left of the OS process once the task row
     is wiped, and :func:`kanban_db_dispatch.reap_terminal_workers` needs them
     to end a worker that survived its own terminal transition."""
+    from hermes_cli.kanban_spawn_ownership import require_resolved
+    require_resolved(conn, task_id)
     now = int(time.time())
     run_id = _current_run_id(conn, task_id)
     if run_id is None:
@@ -2167,6 +2169,9 @@ def _claim_and_open_run(
 ) -> Optional[int]:
     """CAS ``source_status -> running``, open a run row, emit ``claimed``; None
     when the CAS lost. Caller holds the txn."""
+    from hermes_cli.kanban_spawn_ownership import pending
+    if pending(conn, task_id):
+        return None
     cur = conn.execute(
         f"""
         UPDATE tasks
@@ -2394,6 +2399,9 @@ def release_stale_claims(
         "  AND claim_expires < ?", (now,),
     ).fetchall()
     for row in stale:
+        from hermes_cli.kanban_spawn_ownership import pending
+        if pending(conn, row["id"]):
+            continue
         host_local = (row["claim_lock"] or "").startswith(host_prefix)
         hb = row["last_heartbeat_at"]
         # Backstop: a heartbeat older than the max-stale threshold means no
@@ -2515,6 +2523,9 @@ def reclaim_task(
         return False
     if row["status"] != "running" and row["claim_lock"] is None:
         # Nothing to reclaim — already ready / blocked / done.
+        return False
+    from hermes_cli.kanban_spawn_ownership import pending
+    if pending(conn, task_id):
         return False
     prev_lock = row["claim_lock"]
     termination = _terminate_reclaimed_worker(
@@ -3415,6 +3426,8 @@ def _reclaim_dangling_run(
 ) -> None:
     """Close a leaked open run before a status flip so the invariant
     ``current_run_id IS NULL <=> run row terminal`` holds; no-op normally."""
+    from hermes_cli.kanban_spawn_ownership import require_resolved
+    require_resolved(conn, task_id)
     placeholders = ", ".join("?" for _ in statuses)
     stale = conn.execute(
         f"SELECT current_run_id FROM tasks WHERE id = ? AND status IN ({placeholders})",

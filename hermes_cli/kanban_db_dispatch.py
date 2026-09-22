@@ -623,6 +623,9 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
         "  AND t.worker_pid IS NOT NULL"
     ).fetchall()
     for row in rows:
+        from hermes_cli.kanban_spawn_ownership import pending
+        if pending(conn, row["id"]):
+            continue
         lock = row["claim_lock"] or ""
         if not lock.startswith(host_prefix):
             continue
@@ -725,6 +728,9 @@ def detect_stale_running(
     ).fetchall()
 
     for row in rows:
+        from hermes_cli.kanban_spawn_ownership import pending
+        if pending(conn, row["id"]):
+            continue
         if row["active_started_at"] is None:
             continue
         elapsed = now - int(row["active_started_at"])
@@ -810,6 +816,9 @@ def reconcile_orphaned_running(conn: sqlite3.Connection) -> list[str]:
     ).fetchall()
     for row in rows:
         tid = row["id"]
+        from hermes_cli.kanban_spawn_ownership import pending
+        if pending(conn, tid):
+            continue
         pid = row["worker_pid"]
         if pid and _worker_alive(pid, _kb._row_get(row, "worker_started_at")):
             # Never requeue beside a live process. Retry next tick.
@@ -1056,6 +1065,9 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
         ).fetchall()
         host_prefix = _kb._host_prefix()
         for row in rows:
+            from hermes_cli.kanban_spawn_ownership import pending
+            if pending(conn, row["id"]):
+                continue
             lock = row["claim_lock"] or ""
             if not lock.startswith(host_prefix):
                 continue
@@ -1891,10 +1903,14 @@ def _dispatch_lane_task(
         # Force-load sdlc-review; the kanban lifecycle is already in every
         # worker's system prompt via KANBAN_GUIDANCE.
         claimed.skills = list(dict.fromkeys([*(claimed.skills or []), "sdlc-review"]))
+    from hermes_cli import kanban_spawn_ownership as spawn_ownership
+    spawn_ownership.begin(conn, claimed)
     try:
         pid = _call_spawn_fn(spawn_fn if spawn_fn is not None else _default_spawn, claimed, str(workspace), board)
         if pid:
             _set_worker_pid(conn, claimed.id, int(pid))
+        else:
+            spawn_ownership.returned(conn, claimed)
         # Fires AFTER the PID (when reported) is durably persisted. Best-effort.
         _kb._fire_worker_spawned_hook(conn, claimed, str(workspace), pid, board=board)
         # consecutive_failures is deliberately NOT reset here: resetting on
@@ -1904,12 +1920,11 @@ def _dispatch_lane_task(
         _count_spawn(claimed.assignee)
         return True
     except Exception as exc:
-        if _record_task_failure(
-            conn, claimed.id, str(exc),
-            outcome="spawn_failed", failure_limit=failure_limit, release_claim=True, end_run=True,
-        ):
-            result.auto_blocked.append(claimed.id)
-        return False
+        spawn_ownership.uncertain(conn, claimed, exc)
+        # The original run remains running and counts against all spawn caps.
+        # Callback failure is not proof that a process was never created.
+        _count_spawn(claimed.assignee)
+        return True
 
 
 def _apply_default_assignee(
@@ -1953,6 +1968,9 @@ def _run_reclaim_phase(
     board: Optional[str] = None,
 ) -> None:
     """Reclaim stale/orphaned/crashed/timed-out running tasks, then promote."""
+    from hermes_cli.kanban_spawn_ownership import reconcile
+    for row in conn.execute("SELECT id FROM tasks WHERE current_run_id IS NOT NULL").fetchall():
+        reconcile(conn, row['id'])
     reap_worker_zombies()
     result.reaped_terminal_workers = reap_terminal_workers(conn)
     result.reclaimed = _kb.release_stale_claims(conn, failure_limit=failure_limit)
