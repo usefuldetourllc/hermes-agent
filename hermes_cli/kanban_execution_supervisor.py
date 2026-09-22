@@ -101,6 +101,17 @@ def _worker_entry(read_fd, deadline, argv, env_fd=None):
     os.execvpe(argv[0], argv, env)
 
 
+def _profile_worker_entry(task_json, profile, home):
+    """Only the dropped-UID process may load its writable runtime profile."""
+    import json
+    if os.geteuid() == 0:
+        raise RuntimeError('worker profile loading requires dropped privilege')
+    from hermes_cli.kanban_db import Task
+    from hermes_cli.kanban_db_dispatch import _worker_argv
+    command = _worker_argv(Task(**json.loads(task_json)), profile, home)
+    os.execvpe(command[0], command, os.environ)
+
+
 def supervise(db_path, task_id, run_id, claim_lock, scope_id, argv, worker_env=None):
     from hermes_cli import kanban_db_connect as kbc, kanban_execution_scope as scopes
     from hermes_cli.kanban_db_dispatch import _process_fingerprint
@@ -163,6 +174,8 @@ if __name__ == '__main__':
     # Script execution works from an arbitrary native workspace without relying
     # on PYTHONPATH or a globally installed copy of Hermes.
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    if sys.argv[1] == '--profile-worker':
+        raise SystemExit(_profile_worker_entry(*sys.argv[2:]))
     if sys.argv[1] == '--worker':
         _, read_fd, deadline, *command = sys.argv[1:]
         env_fd = None

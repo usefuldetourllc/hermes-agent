@@ -36,11 +36,15 @@ class Authority:
     def __init__(self, policy, *, create=False):
         if sys.platform != 'linux' or os.geteuid() != 0:
             raise RuntimeError('protected execution requires a Linux root dispatcher')
-        if (not isinstance(policy, dict) or set(policy) != {'directory', 'worker_uid', 'worker_gid'}
+        if (not isinstance(policy, dict) or set(policy) != {'directory', 'profiles_directory', 'worker_uid', 'worker_gid'}
                 or any(type(policy[k]) is not int or policy[k] <= 0 for k in ('worker_uid', 'worker_gid'))
-                or not isinstance(policy['directory'], str) or not Path(policy['directory']).is_absolute()):
-            raise RuntimeError('explicit private directory and non-root worker uid/gid required')
+                or any(not isinstance(policy[k], str) or not Path(policy[k]).is_absolute()
+                       for k in ('directory', 'profiles_directory'))):
+            raise RuntimeError('explicit private/profile directories and non-root worker uid/gid required')
         self.policy = dict(policy)
+        self.profiles_directory = protected_path(policy['profiles_directory'])
+        if self.profiles_directory.name != 'profiles' or not self.profiles_directory.is_dir():
+            raise RuntimeError('worker profiles_directory must be a separate profiles directory')
         self.directory = Path(policy['directory'])
         if create and not self.directory.exists():
             protected_path(self.directory.parent)
@@ -67,6 +71,26 @@ class Authority:
                 claim_lock TEXT NOT NULL, profile TEXT, scope TEXT NOT NULL,
                 PRIMARY KEY(board,run_id))''')
         os.chmod(self.path, 0o600)
+
+    def worker_profile(self, name):
+        """Resolve worker state without importing or initializing it as root."""
+        from hermes_cli.profiles import normalize_profile_name
+        name = normalize_profile_name(name)
+        if name == 'default':
+            raise RuntimeError('protected execution requires a named worker profile')
+        profile = self.profiles_directory / name
+        if profile.is_symlink() or not profile.is_dir():
+            raise RuntimeError('protected worker profile must be an installed directory')
+        info = profile.stat()
+        uid, gid = self.policy['worker_uid'], self.policy['worker_gid']
+        if info.st_uid != uid or info.st_gid != gid or stat.S_IMODE(info.st_mode) != 0o700:
+            raise RuntimeError('worker profile must be owned by its worker uid/gid with mode 0700')
+        for parent in profile.parents:
+            info = parent.stat()
+            permission = 0o100 if info.st_uid == uid else 0o010 if info.st_gid == gid else 0o001
+            if not info.st_mode & permission:
+                raise RuntimeError('worker profile ancestors must be traversable by the worker')
+        return profile
 
     @contextmanager
     def transaction(self):

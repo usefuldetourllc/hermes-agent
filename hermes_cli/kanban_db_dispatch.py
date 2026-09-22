@@ -2482,6 +2482,12 @@ def _retag_legacy_worker_sessions(workspaces_root_path: str) -> None:
 
 def _worker_argv(task: Task, profile_arg: str, hermes_home: Optional[str]) -> list[str]:
     """Build the ``hermes -p <profile> --cli ... chat -q ...`` worker command."""
+    from hermes_cli.kanban_execution_authority import current as execution_authority
+    if sys.platform == 'linux' and os.geteuid() == 0 and execution_authority() is not None:
+        from dataclasses import asdict
+        # Defer profile/config/plugin access to a fresh unprivileged process.
+        return [sys.executable, '-I', str(Path(__file__).with_name('kanban_execution_supervisor.py')),
+                '--profile-worker', json.dumps(asdict(task)), profile_arg, str(hermes_home)]
     cmd = [
         *_resolve_hermes_argv(),
         "-p", profile_arg,
@@ -2584,29 +2590,38 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None, e
         build_profile_secret_scope, is_multiplex_active, reset_secret_scope, set_secret_scope)
     from tools.environments.local import build_subprocess_env, strip_launch_profile_env
 
-    try:
-        profile_home = resolve_profile_env(profile_arg)
-    except FileNotFoundError:
-        # No profile dir (isolated test fixtures) — the CLI resolves it from
-        # HERMES_PROFILE (set below) instead.
-        profile_home = None
+    from hermes_cli.kanban_execution_authority import current as execution_authority
+    authority = execution_authority() if execution_scope is not None else None
+    if authority is not None:
+        profile_home = str(authority.worker_profile(profile_arg))
+        # No dispatcher secrets, plugin settings or profile initialization cross
+        # this boundary. The worker loads its own profile after dropping privilege.
+        env = {'PATH': '/usr/local/bin:/usr/bin:/bin', 'HOME': profile_home,
+               'HERMES_HOME': profile_home, 'LANG': 'C.UTF-8'}
+    else:
+        try:
+            profile_home = resolve_profile_env(profile_arg)
+        except FileNotFoundError:
+            # No profile dir (isolated test fixtures) — the CLI resolves it from
+            # HERMES_PROFILE (set below) instead.
+            profile_home = None
 
-    multiplex_active = is_multiplex_active()
-    # build_subprocess_env's secret scrub resolves terminal.env_passthrough vars
-    # through get_secret(), which raises UnscopedSecretError with no profile scope
-    # installed while multiplexing is on — mirrors _resolve_worker_cli_toolsets's
-    # own scope-then-read ordering a few functions up in this module.
-    secret_token = (
-        set_secret_scope(build_profile_secret_scope(Path(profile_home)))
-        if multiplex_active and profile_home else None)
-    try:
-        env = build_subprocess_env(
-            scrub_secrets=multiplex_active,
-            inherit_profile_home=True,
-        )
-    finally:
-        if secret_token is not None:
-            reset_secret_scope(secret_token)
+        multiplex_active = is_multiplex_active()
+        # build_subprocess_env's secret scrub resolves terminal.env_passthrough vars
+        # through get_secret(), which raises UnscopedSecretError with no profile scope
+        # installed while multiplexing is on — mirrors _resolve_worker_cli_toolsets's
+        # own scope-then-read ordering a few functions up in this module.
+        secret_token = (
+            set_secret_scope(build_profile_secret_scope(Path(profile_home)))
+            if multiplex_active and profile_home else None)
+        try:
+            env = build_subprocess_env(
+                scrub_secrets=multiplex_active,
+                inherit_profile_home=True,
+            )
+        finally:
+            if secret_token is not None:
+                reset_secret_scope(secret_token)
     # The dispatcher is detached from every conversation; its worker must never
     # inherit routing mirrored by a previous gateway turn.
     from gateway.session_context import _VAR_MAP
@@ -2621,7 +2636,8 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None, e
         env["HERMES_HOME"] = profile_home
         # A multiplexer dispatching for another profile must not hand it the launch
         # profile's .env settings / TERMINAL_* policy — a standalone dispatcher never would.
-        strip_launch_profile_env(env, profile_home)
+        if authority is None:
+            strip_launch_profile_env(env, profile_home)
     if task.tenant:
         env["HERMES_TENANT"] = task.tenant
     env["HERMES_KANBAN_TASK"] = task.id
@@ -2685,12 +2701,8 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None, e
         authority = execution_authority()
         authority_args = []
         if authority is not None:
-            from hermes_cli.kanban_execution_authority import environment_fd, privileged_environment, verify_runtime, protected_path
+            from hermes_cli.kanban_execution_authority import environment_fd, privileged_environment, verify_runtime
             verify_runtime()
-            if profile_home is None:
-                raise RuntimeError('protected execution requires an installed worker profile')
-            protected_path(Path(profile_home))
-            protected_path(Path(profile_home)/'config.yaml')
             protected_fd = environment_fd(env)
             supervisor_env = privileged_environment()
             supervisor_cwd = str(authority.directory)

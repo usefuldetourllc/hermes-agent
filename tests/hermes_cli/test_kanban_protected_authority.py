@@ -25,9 +25,12 @@ def protected_board(tmp_path, monkeypatch, all_assignees_spawnable):
         if str(path) == '/tmp': break
         if path.stat().st_uid == 0: path.chmod(path.stat().st_mode | 0o011)
     home = tmp_path/'control';home.mkdir(mode=0o755)
-    profiles = home/'profiles';profiles.mkdir(mode=0o755)
-    profile = profiles/'fixture';profile.mkdir(mode=0o755)
-    (profile/'config.yaml').write_text('{}')
+    worker_root = tmp_path/'worker-root';worker_root.mkdir(mode=0o755)
+    profiles = worker_root/'profiles';profiles.mkdir(mode=0o755)
+    profile = profiles/'fixture';profile.mkdir(mode=0o700)
+    (profile/'config.yaml').write_text(json.dumps({'platform_toolsets':{'cli':['clarify']}}))
+    for path in (profile,profile/'config.yaml'):
+        os.chown(path,worker.pw_uid,worker.pw_gid)
     public = tmp_path/'public';public.mkdir(mode=0o777);public.chmod(0o777)
     db_path = public/'kanban.db'
     monkeypatch.setenv('HERMES_HOME',str(home))
@@ -35,7 +38,8 @@ def protected_board(tmp_path, monkeypatch, all_assignees_spawnable):
     monkeypatch.setenv('HERMES_KANBAN_DB',str(db_path))
     monkeypatch.setenv('HERMES_KANBAN_WORKSPACES_ROOT',str(public/'workspaces'))
     monkeypatch.setattr(Path,'home',lambda:home)
-    policy = {'directory':str(tmp_path/'authority'),'worker_uid':worker.pw_uid,'worker_gid':worker.pw_gid}
+    policy = {'directory':str(tmp_path/'authority'),'profiles_directory':str(profiles),
+              'worker_uid':worker.pw_uid,'worker_gid':worker.pw_gid}
     # The consuming readonly config loader, not an injected authority mock.
     (home/'config.yaml').write_text(json.dumps({'kanban':{'execution_authority':policy}}))
     kb.init_db(db_path)
@@ -50,6 +54,7 @@ def protected_board(tmp_path, monkeypatch, all_assignees_spawnable):
 @pytest.mark.parametrize('case',['ordinary','api_forgery','board_forgery','supervisor_loss','provider'])
 def test_protected_cleanup_survives_worker_control_of_board(protected_board,tmp_path,monkeypatch,case):
     home,public,authority,worker = protected_board
+    monkeypatch.setenv('OPENROUTER_API_KEY','root-only-fixture')
     work=public/'work';work.mkdir(mode=0o777);work.chmod(0o777)
     go,release,publication=[work/name for name in ('go','release','observed.json')]
     source = r'''
@@ -57,14 +62,30 @@ import json,os,sys,time
 from pathlib import Path
 sys.path.insert(0,sys.argv[1])
 from hermes_cli import kanban_db as kb,kanban_db_connect as kbc,kanban_execution_scope as scopes
+from hermes_cli.config import load_config
+from hermes_constants import get_hermes_home
+from hermes_state import SessionDB
+config=load_config()
+assert config['platform_toolsets']['cli']==['clarify']
+runtime_home=get_hermes_home()
+(runtime_home/'sessions'/'fixture.txt').write_text('worker runtime is writable')
+db=SessionDB()
+try: db.create_session(session_id='protected-fixture',source='cli')
+finally: db.close()
 until=time.monotonic()+30
 while not Path(sys.argv[2]).exists() and time.monotonic()<until:time.sleep(.02)
 with kbc.connect_closing(Path(os.environ['HERMES_KANBAN_DB'])) as conn:
  task=kb.get_task(conn,os.environ['HERMES_KANBAN_TASK']);run=task.current_run_id;scope=scopes.read(conn,run)
  data={'uid':os.geteuid(),'gid':os.getegid(),'groups':os.getgroups(),'pid':os.getpid(),'blocked':False}
- status=Path('/proc/self/status').read_text()
- data['no_new_privs']='NoNewPrivs:\t1' in status
- data['no_effective_caps']='CapEff:\t0000000000000000' in status
+ status=dict(line.split(':',1) for line in Path('/proc/self/status').read_text().splitlines() if ':' in line)
+ data['no_new_privs']=status['NoNewPrivs'].strip()=='1'
+ data['no_effective_caps']=int(status['CapEff'].strip(),16)==0
+ from hermes_cli.kanban_db_dispatch import _worker_argv
+ command=_worker_argv(task,'fixture',str(runtime_home))
+ assert '--profile-worker' not in command
+ assert command[command.index('--toolsets')+1]=='clarify'
+ assert 'OPENROUTER_API_KEY' not in os.environ
+ data['runtime_home']=str(runtime_home)
  try: Path(sys.argv[5]).joinpath('authority.sqlite3').read_bytes()
  except PermissionError:data['private_read_denied']=True
  try: Path(sys.argv[5]).joinpath('forgery').write_text('fake')
@@ -85,7 +106,12 @@ until=time.monotonic()+30
 while not Path(sys.argv[3]).exists() and time.monotonic()<until:time.sleep(.02)
 '''
     cmd=[sys.executable,'-c',source,str(Path(kb.__file__).resolve().parents[1]),str(go),str(release),str(publication),str(authority.directory),case]
-    monkeypatch.setattr(dispatch,'_worker_argv',lambda *args:cmd)
+    real_worker_argv=dispatch._worker_argv
+    def fixture_argv(task,profile,profile_home):
+        deferred=real_worker_argv(task,profile,profile_home)
+        assert '--profile-worker' in deferred
+        return cmd
+    monkeypatch.setattr(dispatch,'_worker_argv',fixture_argv)
     launched=[];worker_logs=[];real_popen=dispatch.subprocess.Popen
     def popen(argv,**kwargs):
         proc=real_popen(argv,**kwargs)
@@ -107,6 +133,8 @@ while not Path(sys.argv[3]).exists() and time.monotonic()<until:time.sleep(.02)
                 os.chown(path,worker.pw_uid,worker.pw_gid);path.chmod(0o660)
             go.touch();wait_for(publication.exists)
             observed=json.loads(publication.read_text())
+            assert Path(observed['runtime_home'])==authority.worker_profile('fixture')
+            assert (Path(observed['runtime_home'])/'sessions'/'fixture.txt').read_text()=='worker runtime is writable'
             assert observed['uid']==worker.pw_uid and observed['gid']==worker.pw_gid and observed['groups']==[]
             assert observed['no_new_privs'] and observed['no_effective_caps']
             assert observed['private_read_denied'] and observed['private_write_denied']
