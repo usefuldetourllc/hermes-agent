@@ -59,6 +59,14 @@ def _managed_scratch_path_info(p: Path) -> tuple[bool, Optional[str]]:
     if override:
         with contextlib.suppress(OSError):
             roots.append((Path(override).expanduser().resolve(strict=False), None))
+    from hermes_cli.kanban_protected_workspace import default_root
+    protected_root = default_root()
+    if protected_root is not None:
+        # Root-side cleanup must recognize the same board roots sent to workers.
+        with contextlib.suppress(OSError):
+            for entry in protected_root.parent.iterdir():
+                if entry.is_dir() and not entry.is_symlink():
+                    roots.append((entry.resolve(strict=False), entry.name))
     try:
         home = _kb.kanban_home()
     except OSError:

@@ -30,7 +30,9 @@ def test_protected_workspace_write_and_git(protected_board, monkeypatch, variant
     os.chown(worker_parent, worker.pw_uid, worker.pw_gid)
     profile = authority.worker_profile('fixture')
     kind = 'worktree' if 'worktree' in variant else 'dir' if 'dir' in variant else 'scratch'
-    if variant == 'scratch_home': monkeypatch.delenv('HERMES_KANBAN_WORKSPACES_ROOT')
+    if variant == 'scratch_home':
+        monkeypatch.delenv('HERMES_KANBAN_WORKSPACES_ROOT')
+        home.chmod(0o700)
     path = None if variant in ('scratch', 'scratch_home') else worker_parent/'new'/'workspace'
     if kind == 'worktree':
         repo = worker_parent/'repo'
@@ -80,6 +82,14 @@ Path(sys.argv[1]).write_text(json.dumps(data))
             assert data['cwd'] == data['terminal_cwd'] == data['workspace'] == task.workspace_path
             if kind == 'worktree': assert data['branch'] == task.branch_name
             assert not authority.pending(conn, task_id)
+            if variant == 'scratch_home':
+                from hermes_cli import kanban_db_workspace as workspaces
+                assert not Path(task.workspace_path).is_relative_to(home)
+                assert home.stat().st_mode & 0o777 == 0o700
+                assert workspaces._is_managed_scratch_path(Path(task.workspace_path))
+                # The real completion consumer removes the external managed scratch.
+                kb.complete_task(conn, task_id, expected_run_id=task.current_run_id)
+                assert not Path(task.workspace_path).exists()
             assert authority.directory.stat().st_uid == 0
             assert authority.directory.stat().st_mode & 0o777 == 0o700
             print('WORKSPACE_VARIANT', variant, data)

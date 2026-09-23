@@ -56,6 +56,9 @@ worker loads its profile or starts the task. The dispatch-time spawn callback
 contains a requested path; a worktree's final path becomes available on the card
 once workspace preparation succeeds.
 
+Protected default scratch storage is `<profiles_directory>/../workspaces/<board>`,
+outside the private control home. The dispatcher, worker and completion cleanup
+use that same root. An explicit `HERMES_KANBAN_WORKSPACES_ROOT` still takes precedence.
 The root dispatcher grants ownership only for a newly created default scratch
 directory. Its managed parent must be root-owned and not writable by workers,
 and all ancestors must allow worker traversal. Existing directories are never

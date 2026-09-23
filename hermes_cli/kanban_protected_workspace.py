@@ -3,6 +3,19 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import sys
+
+
+def default_root(board=None):
+    """Keep shared worker data beside profiles, outside the private control home."""
+    if sys.platform != 'linux' or os.geteuid() != 0:
+        return None
+    from hermes_cli.kanban_execution_authority import current
+    from hermes_cli import kanban_db as kb
+    authority = current()
+    if authority is None:
+        return None
+    return authority.profiles_directory.parent / 'workspaces' / kb._slug_or_default(board)
 
 
 def _create_scratch(root, task_id, uid, gid):

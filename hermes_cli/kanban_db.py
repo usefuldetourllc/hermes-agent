@@ -508,6 +508,11 @@ def kanban_db_path(board: Optional[str] = None) -> Path:
 def workspaces_root(board: Optional[str] = None) -> Path:
     """Per-board scratch workspace root (``HERMES_KANBAN_WORKSPACES_ROOT`` wins);
     ``default`` keeps the legacy ``<root>/kanban/workspaces/``."""
+    if not os.environ.get("HERMES_KANBAN_WORKSPACES_ROOT", "").strip():
+        from hermes_cli.kanban_protected_workspace import default_root
+        protected_root = default_root(board)
+        if protected_root is not None:
+            return protected_root
     return _board_path("HERMES_KANBAN_WORKSPACES_ROOT", board, ("kanban", "workspaces"), "workspaces")
 
 
