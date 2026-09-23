@@ -224,3 +224,51 @@ def test_protected_owner_rejects_alternate_callback_and_config_change(protected_
             dispatch.dispatch_once(conn,spawn_fn=lambda *args:pytest.fail('unowned callback launched'))
     (home/'config.yaml').write_text(json.dumps({'kanban':{'execution_authority':{**authority.policy,'worker_uid':worker.pw_uid+1}}}))
     with pytest.raises(RuntimeError,match='configuration must be restored'):protected.current()
+
+
+@pytest.mark.linux_only
+def test_protected_systemd_wrapper_receives_recovered_user_bus(protected_board, monkeypatch):
+    import shutil
+    import socket
+    import tempfile
+    from types import SimpleNamespace
+    from tools import process_registry as registry
+    home, public, authority, worker = protected_board
+    workspace = public / 'wrapper-workspace'
+    workspace.mkdir(mode=0o755)
+    runtime = Path(tempfile.mkdtemp(prefix='protected-bus-', dir='/tmp'))
+    bus = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    captured = {}
+    try:
+        bus.bind(str(runtime / 'bus'))
+        monkeypatch.setattr(registry, '_default_user_runtime_dir', lambda: runtime)
+        expected = registry.systemd_user_bus_env({})
+        assert expected['XDG_RUNTIME_DIR'] == str(runtime)
+        assert expected['DBUS_SESSION_BUS_ADDRESS'] == 'unix:path=' + str(runtime / 'bus')
+        monkeypatch.setenv('INVOCATION_ID', 'review-managed-service')
+        # Select the existing managed-service branch without launching or
+        # modifying a service. The real environment builder and spawn remain.
+        monkeypatch.setattr(registry, '_is_supervised_gateway_process', lambda: True)
+        monkeypatch.setattr(registry, '_systemd_run_user_scope_available', lambda: True)
+        real_which = shutil.which
+        monkeypatch.setattr(shutil, 'which', lambda name: '/usr/bin/systemd-run' if name == 'systemd-run' else real_which(name))
+        def capture(argv, **kwargs):
+            captured.update(argv=argv, env=kwargs['env'], pass_fds=kwargs.get('pass_fds'))
+            captured['worker_env'] = protected.read_environment(os.dup(kwargs['pass_fds'][0]))
+            return SimpleNamespace(pid=4242)
+        monkeypatch.setattr(dispatch.subprocess, 'Popen', capture)
+        task = kb.Task(id='review-environment', title='review-environment', body=None, assignee='fixture', status='running', priority=0,
+                       created_by=None, created_at=0, started_at=None, completed_at=None, workspace_kind='dir',
+                       workspace_path=str(workspace), claim_lock='review-claim', claim_expires=None, tenant=None, current_run_id=42)
+        dispatch._default_spawn(task, str(workspace), execution_scope={'id':'review-scope'})
+        assert captured['argv'][:3] == ['/usr/bin/systemd-run', '--user', '--scope']
+        assert captured['pass_fds']
+        assert captured['env'].get('DBUS_SESSION_BUS_ADDRESS') == expected['DBUS_SESSION_BUS_ADDRESS'], 'Protected systemd wrapper lost the recovered user-bus address'
+        assert captured['env'].get('XDG_RUNTIME_DIR') == expected['XDG_RUNTIME_DIR']
+        assert 'HERMES_KANBAN_TASK' not in captured['env']
+        assert captured['worker_env']['HERMES_KANBAN_TASK'] == task.id
+        assert 'DBUS_SESSION_BUS_ADDRESS' not in captured['worker_env']
+        assert 'XDG_RUNTIME_DIR' not in captured['worker_env']
+    finally:
+        bus.close()
+        shutil.rmtree(runtime)

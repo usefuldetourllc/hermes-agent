@@ -2716,8 +2716,9 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None, e
     # that is performing the handoff.
     cmd = _restart_safe_worker_argv(task, cmd)
     from tools.process_registry import systemd_user_bus_env
-    env = systemd_user_bus_env(env)
-    if protected_fd is None: supervisor_env = env
+    # The restart-safe wrapper is the process receiving this environment.
+    # Keep bus recovery out of the separately sealed private worker payload.
+    supervisor_env = systemd_user_bus_env(supervisor_env)
     log_f = _open_worker_log(task, board)
     try:
         proc = subprocess.Popen(  # noqa: S603 -- argv is a fixed list built above
