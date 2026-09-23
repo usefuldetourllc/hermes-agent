@@ -74,8 +74,9 @@ class Authority:
 
     def worker_profile(self, name):
         """Resolve worker state without importing or initializing it as root."""
-        from hermes_cli.profiles import normalize_profile_name
+        from hermes_cli.profiles import normalize_profile_name, validate_profile_name
         name = normalize_profile_name(name)
+        validate_profile_name(name)
         if name == 'default':
             raise RuntimeError('protected execution requires a named worker profile')
         profile = self.profiles_directory / name

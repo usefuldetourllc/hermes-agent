@@ -15,7 +15,7 @@ from hermes_cli import kanban_spawn_ownership as ownership, kanban_execution_aut
 
 
 @pytest.fixture
-def protected_board(tmp_path, monkeypatch, all_assignees_spawnable):
+def protected_board(tmp_path, monkeypatch):
     if os.geteuid() != 0:
         pytest.skip('requires isolated root test launcher for actual UID separation')
     worker = pwd.getpwnam('hermes')

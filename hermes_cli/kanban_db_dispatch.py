@@ -1525,6 +1525,17 @@ def _profile_exists_fn() -> Optional[Callable[[str], bool]]:
         from hermes_cli.profiles import normalize_profile_name, profile_exists
     except Exception:
         return None
+    from hermes_cli.kanban_execution_authority import current as execution_authority
+    authority = execution_authority()
+    if authority is not None:
+        def profile_exists(name: str) -> bool:
+            # Admission and launch must validate the same installed profile;
+            # protected workers do not live below the dispatcher's control home.
+            try:
+                authority.worker_profile(name)
+            except (ValueError, RuntimeError, OSError):
+                return False
+            return True
     allowlist = _dispatch_profile_allowlist(normalize_profile_name)
     if allowlist is None:
         return profile_exists
