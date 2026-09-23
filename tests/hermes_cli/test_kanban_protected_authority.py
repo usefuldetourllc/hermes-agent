@@ -117,7 +117,7 @@ while not Path(sys.argv[3]).exists() and time.monotonic()<until:time.sleep(.02)
         proc=real_popen(argv,**kwargs)
         if 'kanban_execution_supervisor.py' in str(argv):
             launched.append(proc)
-            worker_logs.append(Path(kwargs['stdout'].name))
+            worker_logs.append(Path(os.readlink(f"/proc/self/fd/{kwargs['stdout'].fileno()}")))
         return proc
     monkeypatch.setattr(dispatch.subprocess,'Popen',popen)
     worker_pid=worker_fingerprint=None
