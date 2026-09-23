@@ -190,6 +190,7 @@ while not Path(sys.argv[3]).exists() and time.monotonic()<until:time.sleep(.02)
 def test_protected_real_cli_bootstrap_uses_candidate_from_external_workspace(protected_board):
     home,public,authority,worker = protected_board
     workspace = public/'external-workspace';workspace.mkdir(mode=0o755)
+    os.chown(workspace, worker.pw_uid, worker.pw_gid)
     # A cwd-local package must not replace the root-verified Hermes source.
     decoy = workspace/'hermes_cli';decoy.mkdir()
     (decoy/'__init__.py').write_text("raise RuntimeError('untrusted workspace package imported')")

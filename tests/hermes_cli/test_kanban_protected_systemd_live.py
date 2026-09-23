@@ -20,6 +20,7 @@ def test_protected_supervisor_receives_sealed_environment_through_real_systemd(p
     assert registry._systemd_run_user_scope_available(), 'real root user scope unavailable'
     home, public, authority, worker = protected_board
     workspace = public/'systemd-workspace';workspace.mkdir(mode=0o755)
+    os.chown(workspace, worker.pw_uid, worker.pw_gid)
     # Only select the gateway-origin branch; bus discovery, availability, argv,
     # Popen, scope creation, descriptor transfer and both execs remain real.
     monkeypatch.setenv('INVOCATION_ID','isolated-systemd-qualification')
