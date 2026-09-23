@@ -60,8 +60,10 @@ Protected default scratch storage is `<profiles_directory>/../workspaces/<board>
 outside the private control home. The dispatcher, worker and completion cleanup
 use that same root. An explicit `HERMES_KANBAN_WORKSPACES_ROOT` still takes precedence.
 The root dispatcher grants ownership only for a newly created default scratch
-directory. Its managed parent must be root-owned and not writable by workers,
-and all ancestors must allow worker traversal. Existing directories are never
+directory. A newly created default board workspace parent is root-owned, belongs to the worker
+group, and uses sticky mode `1770`, allowing workers to remove their own finished
+scratch directories. Existing parents retain their permissions; configured scratch
+roots need appropriate worker cleanup access. All ancestors must allow worker traversal. Existing directories are never
 recursively chowned. Explicit scratch/dir paths must be writable by the worker;
 new ones need a worker-writable parent. Worktree repositories (including their
 Git metadata) must already be available to the worker account. Inaccessible

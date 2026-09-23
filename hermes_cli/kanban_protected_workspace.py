@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import tempfile
 import sys
+import stat
 
 
 def default_root(board=None):
@@ -25,7 +26,7 @@ def validate_task_id(task_id):
         raise ValueError('protected task identifier must be one filename component')
 
 
-def _create_scratch(root, task_id, uid, gid):
+def _create_scratch(root, task_id, uid, gid, *, managed_default=False):
     """Grant only a newly created task directory, never chown existing paths.
 
     Descriptor-relative, no-follow operations keep a worker-controlled board
@@ -40,10 +41,11 @@ def _create_scratch(root, task_id, uid, gid):
         parts = (*root.parts[1:], task_id)
         for index, name in enumerate(parts):
             leaf = index == len(parts) - 1
-            if leaf:
+            shared_parent = managed_default and index == len(parts) - 2
+            if leaf or shared_parent:
                 info = os.fstat(fd)
-                if info.st_uid != 0 or info.st_mode & 0o022:
-                    raise RuntimeError('managed scratch parent must be root-owned and not worker-writable')
+                if info.st_uid != 0 or (info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX):
+                    raise RuntimeError('managed scratch parent must be root-owned and protected from entry replacement')
             created = False
             try:
                 os.mkdir(name, mode=0o755, dir_fd=fd)
@@ -53,6 +55,11 @@ def _create_scratch(root, task_id, uid, gid):
             child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             os.close(fd)
             fd = child
+            if shared_parent and created:
+                # Root owns the shared namespace; sticky worker-group access
+                # lets a worker remove its own completed scratch directory.
+                os.fchown(fd, 0, gid)
+                os.fchmod(fd, 0o1770)
             if leaf and created:
                 os.fchown(fd, uid, gid)
                 os.fchmod(fd, 0o700)
@@ -68,7 +75,8 @@ def prepare_request(task, board, authority):
     if (task.workspace_kind or 'scratch') == 'scratch' and not task.workspace_path:
         task.workspace_path = str(_create_scratch(
             kb.workspaces_root(board=board), task.id,
-            authority.policy['worker_uid'], authority.policy['worker_gid']))
+            authority.policy['worker_uid'], authority.policy['worker_gid'],
+            managed_default=kb.workspaces_root(board=board) == default_root(board)))
     elif task.workspace_kind == 'worktree' and not task.workspace_path:
         anchor = (kb.read_board_metadata(board or kb.get_current_board())
                   .get('default_workdir') or '').strip()
