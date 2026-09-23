@@ -4156,6 +4156,8 @@ def gc_worker_logs(*, older_than_seconds: int = 30 * 24 * 3600, board: Optional[
 def worker_log_path(task_id: str, *, board: Optional[str] = None) -> Path:
     """Worker log path (may not exist). The dispatcher always passes ``board``
     explicitly to avoid resolution ambiguity."""
+    from hermes_cli.kanban_protected_workspace import validate_task_id
+    validate_task_id(task_id)
     return worker_logs_dir(board=board) / f"{task_id}.log"
 
 

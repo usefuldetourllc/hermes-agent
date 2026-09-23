@@ -129,3 +129,58 @@ def test_existing_protected_paths_are_not_reowned(protected_board, monkeypatch, 
         assert not observed.exists()
         assert not authority.pending(conn, task_id)
         assert before == (target.stat().st_uid, target.stat().st_gid, target.stat().st_mode)
+
+
+@pytest.mark.linux_only
+@pytest.mark.parametrize('identifier', ['invalid/task', '/invalid/task', '.', '..'])
+def test_invalid_task_identifier_is_rejected_before_launch(protected_board, monkeypatch, identifier):
+    home, public, authority, worker = protected_board
+    monkeypatch.setattr(dispatch, '_worker_argv', lambda *a, **kw: pytest.fail('invalid task launched'))
+    with kbc.connect_closing() as conn:
+        task_id = kb.create_task(conn, title='invalid identifier', assignee='fixture',
+                                 workspace_kind='dir', workspace_path=str(public), max_runtime_seconds=20)
+        with kb.write_txn(conn):
+            conn.execute('UPDATE tasks SET id=? WHERE id=?', (identifier, task_id))
+        result = dispatch.dispatch_once(conn, max_in_progress=1)
+        task = kb.get_task(conn, identifier)
+        assert not result.spawned
+        assert 'one filename component' in task.last_failure_error
+        with pytest.raises(ValueError, match='one filename component'):
+            kb.read_worker_log(identifier)
+        assert not authority.pending(conn)
+
+
+@pytest.mark.linux_only
+def test_workspace_preparation_cannot_extend_launch_deadline(tmp_path, monkeypatch):
+    import time
+    from hermes_cli import kanban_execution_supervisor as supervisor
+    from hermes_cli import kanban_execution_authority as protected
+    from hermes_cli import kanban_protected_workspace as workspace
+    prepared = []
+    def prepare(_request):
+        time.sleep(.15)
+        prepared.append(True)
+    monkeypatch.setattr(workspace, 'resolve_request', prepare)
+    monkeypatch.setattr(supervisor.os, 'execvpe', lambda *a: pytest.fail('expired command executed'))
+    monkeypatch.chdir(tmp_path)
+    original_env = dict(os.environ)
+    fd = protected.environment_fd({'HERMES_HOME': str(tmp_path), 'HERMES_KANBAN_WORKSPACE_REQUEST': '{}'})
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, b'1');os.close(write_fd)
+    try:
+        result = supervisor._worker_entry(read_fd, time.time()+.1, ['unused'], env_fd=fd)
+        assert prepared and result == 1
+    finally:
+        os.environ.clear();os.environ.update(original_env)
+
+
+@pytest.mark.linux_only
+def test_protected_log_open_rejects_existing_symlink(protected_board):
+    from types import SimpleNamespace
+    home, public, authority, worker = protected_board
+    directory = kb.worker_logs_dir();directory.mkdir(parents=True)
+    destination = public/'existing-output';destination.write_text('unchanged')
+    (directory/'t_log_guard.log').symlink_to(destination)
+    with pytest.raises(RuntimeError, match='symlinks'):
+        dispatch._open_worker_log(SimpleNamespace(id='t_log_guard'), None)
+    assert destination.read_text() == 'unchanged'

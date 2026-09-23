@@ -18,14 +18,20 @@ def default_root(board=None):
     return authority.profiles_directory.parent / 'workspaces' / kb._slug_or_default(board)
 
 
+def validate_task_id(task_id):
+    """A board identifier must remain one filename component at root boundaries."""
+    if (not isinstance(task_id, str) or not task_id or task_id in ('.', '..')
+            or '/' in task_id or '\x00' in task_id):
+        raise ValueError('protected task identifier must be one filename component')
+
+
 def _create_scratch(root, task_id, uid, gid):
     """Grant only a newly created task directory, never chown existing paths.
 
     Descriptor-relative, no-follow operations keep a worker-controlled board
     directory from redirecting root's ownership changes through a symlink.
     """
-    if not task_id or task_id in ('.', '..') or '/' in task_id:
-        raise ValueError('invalid scratch task identifier')
+    validate_task_id(task_id)
     root = Path(root).expanduser().absolute()
     if '..' in root.parts:
         raise ValueError('scratch root must not contain parent traversal')
@@ -58,6 +64,7 @@ def _create_scratch(root, task_id, uid, gid):
 def prepare_request(task, board, authority):
     """Resolve root-owned metadata only; defer filesystem work to the worker."""
     from hermes_cli import kanban_db as kb
+    validate_task_id(task.id)
     if (task.workspace_kind or 'scratch') == 'scratch' and not task.workspace_path:
         task.workspace_path = str(_create_scratch(
             kb.workspaces_root(board=board), task.id,

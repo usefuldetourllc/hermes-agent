@@ -109,6 +109,9 @@ def _worker_entry(read_fd, deadline, argv, env_fd=None):
             workspace = env.get('TERMINAL_CWD')
             if workspace and Path(workspace).is_dir(): os.chdir(workspace)
         env = os.environ
+    # Git checkout/configuration may have consumed the remaining launch time.
+    if deadline is not None and time.time() >= deadline:
+        return 1
     os.execvpe(argv[0], argv, env)
 
 

@@ -2566,11 +2566,23 @@ def _open_worker_log(task: Task, board: Optional[str]):
     rotated first. Anchored at the board root (not the shared kanban root) so
     `hermes kanban log` reads its own file and boards sharing task ids don't
     collide."""
+    from hermes_cli.kanban_execution_authority import current, protected_path
+    authority = current() if sys.platform == 'linux' and os.geteuid() == 0 else None
+    if authority is not None:
+        from hermes_cli.kanban_protected_workspace import validate_task_id
+        validate_task_id(task.id)
     log_dir = _kb.worker_logs_dir(board=board)
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"{task.id}.log"
+    log_path = _kb.worker_log_path(task.id, board=board)
+    if authority is not None:
+        protected_path(log_dir)
+        if log_path.exists() or log_path.is_symlink():
+            protected_path(log_path)
     rotate_bytes, backup_count = worker_log_rotation_config()
     _rotate_worker_log(log_path, rotate_bytes, backup_count)
+    if authority is not None:
+        fd = os.open(log_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        return os.fdopen(fd, 'ab')
     return open(log_path, "ab")
 
 
