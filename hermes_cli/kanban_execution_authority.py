@@ -177,13 +177,25 @@ def current():
 
 def environment_fd(value):
     import fcntl
+    if sys.platform != 'linux':
+        raise RuntimeError('protected worker environments require Linux sealing')
+    # Linux UAPI (linux/fcntl.h): these operation numbers and seal bits are
+    # stable even when CPython was built with headers that omit the names.
+    add_seals = getattr(fcntl, 'F_ADD_SEALS', 1033)
+    get_seals = getattr(fcntl, 'F_GET_SEALS', 1034)
+    seals = (getattr(fcntl, 'F_SEAL_SEAL', 0x0001)
+             | getattr(fcntl, 'F_SEAL_SHRINK', 0x0002)
+             | getattr(fcntl, 'F_SEAL_GROW', 0x0004)
+             | getattr(fcntl, 'F_SEAL_WRITE', 0x0008))
     data = json.dumps(value).encode()
     if len(data) > 256 * 1024 or not isinstance(value, dict) or not all(isinstance(k,str) and isinstance(v,str) for k,v in value.items()):
         raise RuntimeError('invalid protected worker environment')
     fd = os.memfd_create('kanban-worker-environment', os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
     try:
         os.write(fd,data);os.lseek(fd,0,os.SEEK_SET)
-        fcntl.fcntl(fd,fcntl.F_ADD_SEALS,fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL)
+        fcntl.fcntl(fd, add_seals, seals)
+        if fcntl.fcntl(fd, get_seals) & seals != seals:
+            raise RuntimeError('kernel did not seal the protected worker environment')
         return fd
     except BaseException:
         os.close(fd);raise

@@ -1926,6 +1926,22 @@ def _dispatch_lane_task(
         # worker's system prompt via KANBAN_GUIDANCE.
         claimed.skills = list(dict.fromkeys([*(claimed.skills or []), "sdlc-review"]))
     from hermes_cli import kanban_spawn_ownership as spawn_ownership
+    if spawn_fn is None and sys.platform == 'linux':
+        from hermes_cli import kanban_execution_authority as protected
+        if protected.current() is not None:
+            # Check the real kernel transport before recording any attempted
+            # launch. A missing capability cannot have created a worker.
+            try:
+                probe_fd = protected.environment_fd({})
+                os.close(probe_fd)
+            except Exception as exc:
+                if _record_task_failure(
+                    conn, claimed.id, f'protected environment: {exc}',
+                    outcome='spawn_failed', failure_limit=failure_limit,
+                    release_claim=True, end_run=True,
+                ):
+                    result.auto_blocked.append(claimed.id)
+                return False
     spawn_ownership.begin(conn, claimed)
     try:
         if spawn_fn is None and sys.platform == 'linux':
