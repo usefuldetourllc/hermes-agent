@@ -96,8 +96,19 @@ def _worker_entry(read_fd, deadline, argv, env_fd=None):
     if env_fd is not None:
         from hermes_cli.kanban_execution_authority import read_environment
         env = read_environment(env_fd)
-        workspace = env.get('TERMINAL_CWD')
-        if workspace and Path(workspace).is_dir(): os.chdir(workspace)
+        # Workspace Git/config/filesystem operations belong to the supervised,
+        # dropped-UID child, including any checkout filters or hooks it starts.
+        os.environ.clear()
+        os.environ.update(env)
+        request = os.environ.pop('HERMES_KANBAN_WORKSPACE_REQUEST', None)
+        if request is not None:
+            os.chdir(os.environ['HERMES_HOME'])
+            from hermes_cli.kanban_protected_workspace import resolve_request
+            resolve_request(request)
+        else:
+            workspace = env.get('TERMINAL_CWD')
+            if workspace and Path(workspace).is_dir(): os.chdir(workspace)
+        env = os.environ
     os.execvpe(argv[0], argv, env)
 
 

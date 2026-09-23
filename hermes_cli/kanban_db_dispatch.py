@@ -1917,7 +1917,12 @@ def _dispatch_lane_task(
         return False
     try:
         resolved_branch_name = None
-        if claimed.workspace_kind == "worktree":
+        from hermes_cli.kanban_execution_authority import current as execution_authority
+        authority = execution_authority() if spawn_fn is None and sys.platform == 'linux' else None
+        if authority is not None:
+            from hermes_cli.kanban_protected_workspace import prepare_request
+            workspace = prepare_request(claimed, board, authority)
+        elif claimed.workspace_kind == "worktree":
             workspace, resolved_branch_name = _kbw._resolve_worktree_workspace(claimed, board=board)
         else:
             workspace = _kbw.resolve_workspace(claimed, board=board)
@@ -1928,9 +1933,10 @@ def _dispatch_lane_task(
         ):
             result.auto_blocked.append(claimed.id)
         return False
-    _kbw.set_workspace_path(conn, claimed.id, str(workspace))
-    if claimed.workspace_kind == "worktree":
-        _kbw.set_branch_name(conn, claimed.id, resolved_branch_name or (claimed.branch_name or "").strip() or f"wt/{claimed.id}")
+    if authority is None:
+        _kbw.set_workspace_path(conn, claimed.id, str(workspace))
+        if claimed.workspace_kind == "worktree":
+            _kbw.set_branch_name(conn, claimed.id, resolved_branch_name or (claimed.branch_name or "").strip() or f"wt/{claimed.id}")
     _kbw._maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
     if lane == "review":
         # Force-load sdlc-review; the kanban lifecycle is already in every
@@ -2732,6 +2738,11 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None, e
         if authority is not None:
             from hermes_cli.kanban_execution_authority import environment_fd, privileged_environment, verify_runtime
             verify_runtime()
+            from dataclasses import asdict
+            env['HERMES_KANBAN_WORKSPACE_REQUEST'] = json.dumps({
+                'task': asdict(task),
+                'default_workdir': workspace if task.workspace_kind == 'worktree' and not task.workspace_path else None,
+            })
             protected_fd = environment_fd(env)
             supervisor_env = privileged_environment()
             supervisor_cwd = str(authority.directory)

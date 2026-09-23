@@ -46,6 +46,25 @@ For Hermes profile lanes, the dispatcher's `_default_spawn` runs `hermes -p <ass
 
 For non-Hermes lanes (registered via a plugin), the plugin supplies its own `spawn_fn` callable that gets `task`, `workspace`, and `board` and returns an optional pid for crash detection.
 
+### Protected Linux workspace access
+
+With `kanban.execution_authority` enabled, workspace creation and Git checkout run
+inside the supervised worker after it drops to the configured worker UID/GID.
+Git hooks and filters therefore share the worker's deadline and cleanup ownership.
+The actual workspace path and branch are saved for the original claim before the
+worker loads its profile or starts the task. The dispatch-time spawn callback
+contains a requested path; a worktree's final path becomes available on the card
+once workspace preparation succeeds.
+
+The root dispatcher grants ownership only for a newly created default scratch
+directory. Its managed parent must be root-owned and not writable by workers,
+and all ancestors must allow worker traversal. Existing directories are never
+recursively chowned. Explicit scratch/dir paths must be writable by the worker;
+new ones need a worker-writable parent. Worktree repositories (including their
+Git metadata) must already be available to the worker account. Inaccessible
+existing paths fail startup and retain their permissions; provision appropriate
+worker storage rather than granting access to the private authority directory.
+
 ### Descendant process scope
 
 A task assignment belongs to the dispatcher worker, not to every program it starts.
