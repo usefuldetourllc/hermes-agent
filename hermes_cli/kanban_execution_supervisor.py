@@ -7,6 +7,7 @@ import ctypes
 import os
 from pathlib import Path
 import signal
+import select
 import subprocess
 import sys
 import time
@@ -49,6 +50,11 @@ def _launch_worker(conn, run_id, scope, pid, fingerprint, argv, may_launch, work
     from hermes_cli import kanban_execution_scope as scopes
     from hermes_cli.kanban_db_dispatch import _process_fingerprint
     read_fd, write_fd = os.pipe()
+    from hermes_cli import kanban_execution_admission as admission
+    from hermes_cli.kanban_execution_authority import current
+    guarded = admission.configured(current())
+    ready_read, ready_write = os.pipe() if guarded else (None, None)
+    final_read, final_write = os.pipe() if guarded else (None, None)
     env_fd = None
     if worker_env is not None:
         from hermes_cli.kanban_execution_authority import environment_fd
@@ -58,18 +64,40 @@ def _launch_worker(conn, run_id, scope, pid, fingerprint, argv, may_launch, work
         # even an immediate provider rejection racing its durable identity.
         proc = subprocess.Popen(
             [sys.executable, *(['-I'] if worker_env is not None else []), str(Path(__file__).resolve()), '--worker', str(read_fd),
-             str(scope['deadline']), *([] if env_fd is None else ['--environment-fd', str(env_fd)]), *argv],
-            stdin=subprocess.DEVNULL, pass_fds=(read_fd,) if env_fd is None else (read_fd,env_fd),
+             str(scope['deadline']), *([] if env_fd is None else ['--environment-fd', str(env_fd)]),
+             *([] if ready_write is None else ['--ready-fd', str(ready_write), '--final-gate-fd', str(final_read)]), *argv],
+            stdin=subprocess.DEVNULL, pass_fds=tuple(fd for fd in (read_fd, env_fd, ready_write, final_read) if fd is not None),
             **_worker_credentials())
         scopes.bind_worker(conn, run_id, scope['id'], pid, fingerprint,
                            proc.pid, _process_fingerprint(proc.pid))
-        if may_launch():
+        if ready_write is not None:
+            os.close(ready_write);ready_write = None
+            try:
+                authorized = may_launch() and admission.authorize(conn, run_id) and may_launch()
+            except Exception:
+                authorized = False
+            if not authorized: return proc
+            os.write(write_fd, b'1')
+            while may_launch():
+                if select.select([ready_read], [], [], .05)[0]:
+                    if os.read(ready_read, 1) == b'1' and may_launch():
+                        try:
+                            authorized = admission.check(conn, run_id)
+                        except Exception:
+                            # Closing the gate prevents model exec; the normal
+                            # supervisor loop still reaps and publishes cleanup.
+                            authorized = False
+                        if authorized and may_launch(): os.write(final_write, b'1')
+                    break
+        elif may_launch():
             os.write(write_fd, b'1')
         return proc
     finally:
         os.close(read_fd)
         os.close(write_fd)
         if env_fd is not None: os.close(env_fd)
+        for fd in (ready_read, ready_write, final_read, final_write):
+            if fd is not None: os.close(fd)
 
 
 def _worker_credentials():
@@ -84,14 +112,12 @@ def _worker_credentials():
     return {'user': authority.policy['worker_uid'], 'group': authority.policy['worker_gid'], 'extra_groups': []}
 
 
-def _worker_entry(read_fd, deadline, argv, env_fd=None):
-    try:
-        granted = os.read(read_fd, 1) == b'1'
-    finally:
-        os.close(read_fd)
-    # DB/pipe startup waits cannot extend the original absolute cutoff.
-    if not granted or (deadline is not None and time.time() >= deadline):
-        return 1
+def _worker_entry(read_fd, deadline, argv, env_fd=None, ready_fd=None, final_fd=None):
+    def granted(fd):
+        try: return os.read(fd, 1) == b'1'
+        finally: os.close(fd)
+    if not granted(read_fd): return 1
+    if deadline is not None and time.time() >= deadline: return 1
     env = os.environ
     if env_fd is not None:
         from hermes_cli.kanban_execution_authority import read_environment
@@ -109,6 +135,10 @@ def _worker_entry(read_fd, deadline, argv, env_fd=None):
             workspace = env.get('TERMINAL_CWD')
             if workspace and Path(workspace).is_dir(): os.chdir(workspace)
         env = os.environ
+    if ready_fd is not None:
+        try: os.write(ready_fd, b'1')
+        finally: os.close(ready_fd)
+        if not granted(final_fd): return 1
     # Git checkout/configuration may have consumed the remaining launch time.
     if deadline is not None and time.time() >= deadline:
         return 1
@@ -184,6 +214,8 @@ def supervise(db_path, task_id, run_id, claim_lock, scope_id, argv, worker_env=N
             if not empty:
                 raise RuntimeError('execution still owns children')
             scopes.finish(conn, run_id, scope_id, pid, fingerprint, reason=reason, returncode=root_code)
+            from hermes_cli import kanban_execution_admission as admission
+            admission.cleanup(conn, run_id)
             return root_code if root_code is not None and root_code >= 0 else 1
         finally:
             # Unexpected failures must not publish cleanup. Attempt to kill
@@ -206,7 +238,12 @@ if __name__ == '__main__':
         env_fd = None
         if command[0] == '--environment-fd':
             env_fd = int(command[1]);command = command[2:]
-        raise SystemExit(_worker_entry(int(read_fd), None if deadline == 'None' else float(deadline), command, env_fd=env_fd))
+        ready_fd = final_fd = None
+        if command[0] == '--ready-fd':
+            ready_fd = int(command[1]);command = command[2:]
+            if command[0] != '--final-gate-fd': raise SystemExit('final admission gate required')
+            final_fd = int(command[1]);command = command[2:]
+        raise SystemExit(_worker_entry(int(read_fd), None if deadline == 'None' else float(deadline), command, env_fd=env_fd, ready_fd=ready_fd, final_fd=final_fd))
     arguments = sys.argv[1:]
     authority = None
     worker_env = None

@@ -164,3 +164,29 @@ So lane authors don't have to reimplement these:
 - [Kanban overview](./kanban) — the user-facing intro.
 - [Kanban tutorial](./kanban-tutorial) — walkthrough with the dashboard open.
 - [`KANBAN_GUIDANCE`](https://github.com/NousResearch/hermes-agent/blob/main/agent/prompt_builder.py) — the worker + orchestrator lifecycle injected into every kanban worker's system prompt.
+
+### Optional protected execution admission
+
+An operator can add `admission_command` (an argv list beginning with an absolute,
+root-controlled executable) to the opt-in `kanban.execution_authority` policy.
+The private authority latches that policy; removing configuration does not return
+its pending executions to ordinary spawning. The adapter and its dependencies
+must be trusted, root-controlled code. Model workers must not receive its keys
+or reusable control-plane credentials.
+
+The adapter receives a bounded JSON request on stdin with contract
+`protected-execution-admission-v1`, phase, original board/run and latched authority
+policy. It must read original execution identity through
+`Authority.original_execution`, not trust the worker-writable board projection.
+The phases are `prepare` (receipt plus earlier absolute deadline), `launch`
+(one-shot authorization before workspace code), `check` (current original owner
+after workspace preparation, before model exec), and `cleanup` (acknowledged
+original private ECHILD receipt). Replies are bounded JSON on stdout. Adapter
+failure has no unguarded fallback, and stderr is not copied into worker logs.
+
+The private ledger retains the prepared task snapshot, grant reference and
+launch/input attempt markers. Lost launch responses close the worker gate.
+Cleanup response loss retains local occupancy; later dispatcher ticks retry only
+the original cleanup receipt. Custom spawn callbacks and direct protected spawn
+without its original supervised scope are refused. Enabling this interface alone
+does not qualify an adapter or authorize a production rollout.

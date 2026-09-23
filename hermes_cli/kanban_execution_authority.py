@@ -36,11 +36,20 @@ class Authority:
     def __init__(self, policy, *, create=False):
         if sys.platform != 'linux' or os.geteuid() != 0:
             raise RuntimeError('protected execution requires a Linux root dispatcher')
-        if (not isinstance(policy, dict) or set(policy) != {'directory', 'profiles_directory', 'worker_uid', 'worker_gid'}
+        if (not isinstance(policy, dict) or not {'directory', 'profiles_directory', 'worker_uid', 'worker_gid'} <= set(policy)
+                or set(policy) - {'directory', 'profiles_directory', 'worker_uid', 'worker_gid', 'admission_command'}
                 or any(type(policy[k]) is not int or policy[k] <= 0 for k in ('worker_uid', 'worker_gid'))
                 or any(not isinstance(policy[k], str) or not Path(policy[k]).is_absolute()
                        for k in ('directory', 'profiles_directory'))):
             raise RuntimeError('explicit private/profile directories and non-root worker uid/gid required')
+        command = policy.get('admission_command')
+        if command is not None:
+            if (not isinstance(command, list) or not command or len(command) > 16
+                    or not all(isinstance(arg, str) and arg for arg in command)
+                    or not Path(command[0]).is_absolute()):
+                raise RuntimeError('trusted absolute admission command required')
+            for arg in command:
+                if Path(arg).is_absolute(): protected_path(arg)
         self.policy = dict(policy)
         self.profiles_directory = protected_path(policy['profiles_directory'])
         if self.profiles_directory.name != 'profiles' or not self.profiles_directory.is_dir():
@@ -108,6 +117,14 @@ class Authority:
         finally:
             db.close()
 
+    def original_execution(self, conn, run_id):
+        """Original identity from the private ledger, never the board projection."""
+        with self.transaction() as db:
+            row = db.execute('SELECT * FROM executions WHERE board=? AND run_id=?',
+                             (board_path(conn), run_id)).fetchone()
+        if row is None: return None
+        return {**dict(row), 'scope': json.loads(row['scope'])}
+
     def read(self, conn, run_id):
         with self.transaction() as db:
             row = db.execute('SELECT scope FROM executions WHERE board=? AND run_id=?', (board_path(conn), run_id)).fetchone()
@@ -115,16 +132,21 @@ class Authority:
 
     def pending(self, conn=None, task_id=None):
         with self.transaction() as db:
-            rows = db.execute('''SELECT * FROM executions WHERE json_extract(scope,'$.state') != 'settled'
+            rows = db.execute('''SELECT * FROM executions WHERE (json_extract(scope,'$.state') != 'settled'
+                OR (json_type(scope,'$.admission') IS NOT NULL
+                    AND coalesce(json_extract(scope,'$.admission_cleanup_confirmed'),0) != 1))
                 AND (? IS NULL OR board=?) AND (? IS NULL OR task_id=?)''',
                 (None if conn is None else board_path(conn), None if conn is None else board_path(conn), task_id, task_id)).fetchall()
         return [dict(row) for row in rows]
 
     def prepare(self, conn, task, scope):
-        scope = {**scope, 'contract': CONTRACT}
+        from dataclasses import asdict
+        scope = {**scope, 'contract': CONTRACT, 'prepared_task': asdict(task)}
         with self.transaction() as db:
             # This protected owner is intentionally serial across all its boards.
-            if db.execute("SELECT 1 FROM executions WHERE json_extract(scope,'$.state') != 'settled'").fetchone():
+            if db.execute("""SELECT 1 FROM executions WHERE (json_extract(scope,'$.state') != 'settled'
+                OR (json_type(scope,'$.admission') IS NOT NULL
+                    AND coalesce(json_extract(scope,'$.admission_cleanup_confirmed'),0) != 1))""").fetchone():
                 raise RuntimeError('protected execution capacity remains occupied')
             db.execute('INSERT INTO executions VALUES(?,?,?,?,?,?)',
                 (board_path(conn), task.current_run_id, task.id, task.claim_lock, task.assignee, json.dumps(scope)))

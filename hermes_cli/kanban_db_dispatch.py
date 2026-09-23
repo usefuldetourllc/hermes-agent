@@ -1964,6 +1964,9 @@ def _dispatch_lane_task(
         if spawn_fn is None and sys.platform == 'linux':
             from hermes_cli import kanban_execution_scope as scopes
             scope = scopes.prepare(conn, claimed)
+            from hermes_cli import kanban_execution_admission as admission
+            admission.prepare(conn, claimed.current_run_id)
+            scope = scopes.read(conn, claimed.current_run_id)
             pid = _default_spawn(claimed, str(workspace), board=board, execution_scope=scope)
         else:
             pid = _call_spawn_fn(spawn_fn if spawn_fn is not None else _default_spawn, claimed, str(workspace), board)
@@ -2171,6 +2174,8 @@ def _dispatch_once_locked(
     authority = execution_authority()
     if authority is not None and spawn_fn is not None:
         raise RuntimeError('protected execution cannot use an unowned spawn callback')
+    from hermes_cli import kanban_execution_admission as admission
+    admission.reconcile(conn)
     result = DispatchResult()
     _run_reclaim_phase(
         conn, result, stale_timeout_seconds=stale_timeout_seconds,
@@ -2629,6 +2634,10 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None, e
     if not task.assignee:
         raise ValueError(f"task {task.id} has no assignee")
 
+    from hermes_cli.kanban_execution_authority import current as execution_authority
+    authority = execution_authority()
+    if authority is not None and execution_scope is None:
+        raise RuntimeError('protected execution requires its original supervised scope')
     from hermes_cli.profiles import normalize_profile_name, resolve_profile_env
 
     profile_arg = normalize_profile_name(task.assignee)
@@ -2637,8 +2646,6 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None, e
         build_profile_secret_scope, is_multiplex_active, reset_secret_scope, set_secret_scope)
     from tools.environments.local import build_subprocess_env, strip_launch_profile_env
 
-    from hermes_cli.kanban_execution_authority import current as execution_authority
-    authority = execution_authority() if execution_scope is not None else None
     if authority is not None:
         profile_home = str(authority.worker_profile(profile_arg))
         # No dispatcher secrets, plugin settings or profile initialization cross
