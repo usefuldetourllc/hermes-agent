@@ -81,11 +81,14 @@ def cleanup(conn, run_id):
 
 
 def reconcile(conn):
-    """Retry only original cleanup, never an uncertain preparation or launch."""
+    """Reconcile cleanup or revoke preparation; never retry a model launch."""
     authority = protected.current()
     if not configured(authority): return
     for row in authority.pending(conn):
         scope = json.loads(row['scope'])
+        if scope.get('state') in {'prepared', 'cancelling'}:
+            from hermes_cli.kanban_execution_cancellation import cancel
+            cancel(conn, row['run_id'])
         if scope.get('admission') and scope.get('state') == 'settled':
             cleanup(conn, row['run_id'])
 

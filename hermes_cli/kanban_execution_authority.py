@@ -132,21 +132,23 @@ class Authority:
 
     def pending(self, conn=None, task_id=None):
         with self.transaction() as db:
-            rows = db.execute('''SELECT * FROM executions WHERE (json_extract(scope,'$.state') != 'settled'
-                OR (json_type(scope,'$.admission') IS NOT NULL
-                    AND coalesce(json_extract(scope,'$.admission_cleanup_confirmed'),0) != 1))
-                AND (? IS NULL OR board=?) AND (? IS NULL OR task_id=?)''',
+            rows = db.execute('''SELECT * FROM executions WHERE
+                (? IS NULL OR board=?) AND (? IS NULL OR task_id=?)''',
                 (None if conn is None else board_path(conn), None if conn is None else board_path(conn), task_id, task_id)).fetchall()
-        return [dict(row) for row in rows]
+        return [dict(row) for row in rows if not self.resolved(json.loads(row['scope']))]
+
+    @staticmethod
+    def resolved(scope):
+        from hermes_cli.kanban_execution_cancellation import cancelled
+        return cancelled(scope) or (scope.get('state') == 'settled'
+            and (scope.get('admission') is None or scope.get('admission_cleanup_confirmed') is True))
 
     def prepare(self, conn, task, scope):
         from dataclasses import asdict
         scope = {**scope, 'contract': CONTRACT, 'prepared_task': asdict(task)}
         with self.transaction() as db:
             # This protected owner is intentionally serial across all its boards.
-            if db.execute("""SELECT 1 FROM executions WHERE (json_extract(scope,'$.state') != 'settled'
-                OR (json_type(scope,'$.admission') IS NOT NULL
-                    AND coalesce(json_extract(scope,'$.admission_cleanup_confirmed'),0) != 1))""").fetchone():
+            if any(not self.resolved(json.loads(row['scope'])) for row in db.execute('SELECT scope FROM executions')):
                 raise RuntimeError('protected execution capacity remains occupied')
             db.execute('INSERT INTO executions VALUES(?,?,?,?,?,?)',
                 (board_path(conn), task.current_run_id, task.id, task.claim_lock, task.assignee, json.dumps(scope)))
