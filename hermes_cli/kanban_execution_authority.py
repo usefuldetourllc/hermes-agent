@@ -79,6 +79,7 @@ class Authority:
                 board TEXT NOT NULL, run_id INTEGER NOT NULL, task_id TEXT NOT NULL,
                 claim_lock TEXT NOT NULL, profile TEXT, scope TEXT NOT NULL,
                 PRIMARY KEY(board,run_id))''')
+            db.execute('CREATE TABLE IF NOT EXISTS retirement (singleton INTEGER PRIMARY KEY CHECK(singleton=1), receipt TEXT NOT NULL)')
         os.chmod(self.path, 0o600)
 
     def worker_profile(self, name):
@@ -147,6 +148,8 @@ class Authority:
         from dataclasses import asdict
         scope = {**scope, 'contract': CONTRACT, 'prepared_task': asdict(task)}
         with self.transaction() as db:
+            if db.execute('SELECT 1 FROM retirement').fetchone():
+                raise RuntimeError('protected execution authority is retired')
             # This protected owner is intentionally serial across all its boards.
             if any(not self.resolved(json.loads(row['scope'])) for row in db.execute('SELECT scope FROM executions')):
                 raise RuntimeError('protected execution capacity remains occupied')
@@ -156,11 +159,38 @@ class Authority:
 
     def update(self, conn, run_id, original, updated):
         with self.transaction() as db:
+            if original != updated and db.execute('SELECT 1 FROM retirement').fetchone():
+                raise RuntimeError('protected execution authority is retired')
             row = db.execute('SELECT scope FROM executions WHERE board=? AND run_id=?', (board_path(conn),run_id)).fetchone()
             if not row or json.loads(row['scope']) != original:
                 raise RuntimeError('original protected execution ownership changed')
             db.execute('UPDATE executions SET scope=? WHERE board=? AND run_id=?',
                        (json.dumps(updated),board_path(conn),run_id))
+
+    def retire(self, context):
+        """Permanently close a reconciled owner, serialized against preparation.
+
+        Replaying the same context recovers the original private receipt. A
+        public board edit cannot clear occupancy or reopen this authority.
+        """
+        if not isinstance(context, str) or not context or len(context) > 300:
+            raise ValueError('bounded retirement context required')
+        with self.transaction() as db:
+            prior = db.execute('SELECT receipt FROM retirement').fetchone()
+            if prior:
+                receipt = json.loads(prior['receipt'])
+                if receipt['context'] != context:
+                    raise RuntimeError('original retirement context required')
+                return receipt
+            rows = [dict(row) for row in db.execute('SELECT * FROM executions ORDER BY board,run_id')]
+            for row in rows:
+                row['scope'] = json.loads(row['scope'])
+            if any(not self.resolved(row['scope']) for row in rows):
+                raise RuntimeError('protected execution capacity remains occupied')
+            receipt = {'contract': 'protected-authority-retirement-v1',
+                       'context': context, 'policy': self.policy, 'executions': rows}
+            db.execute('INSERT INTO retirement VALUES(1,?)', (json.dumps(receipt, sort_keys=True),))
+            return receipt
 
 
 @contextmanager
