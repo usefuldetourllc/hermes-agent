@@ -53,6 +53,7 @@ print(json.dumps({'cancelled':True}))
         assert not authority.pending(conn) and not ownership.pending(conn,task_id)
         assert kb.get_task(conn,task_id).status=='blocked'
         assert kb.get_task(conn,task_id).consecutive_failures==1
+
         assert kb.list_runs(conn,task_id)[-1].ended_at is not None
         with pytest.raises(RuntimeError):
             scopes.activate(conn,task_id,run.id,run.claim_lock,original['id'],os.getpid(),'late-supervisor')
@@ -60,6 +61,33 @@ print(json.dumps({'cancelled':True}))
         dispatch.dispatch_once(conn,failure_limit=5)
         assert len(kb.list_runs(conn,task_id))==1
         assert kb.get_task(conn,task_id).consecutive_failures==1
+
+        successor=protected.Authority({**policy,'directory':str(tmp_path/'successor')},create=True)
+        with pytest.raises(RuntimeError,match='durably retired'):
+            successor.retain_retired(authority,'original-workflow')
+        authority.retire('original-workflow')
+        with protected.using(successor):
+            assert dispatch.count_running_tasks(conn)==1  # Reproduces the shared-board deadlock.
+            with pytest.raises(RuntimeError,match='original retirement'):
+                successor.retain_retired(authority,'wrong-workflow')
+            successor.retain_retired(authority,'original-workflow')
+            successor.retain_retired(authority,'original-workflow')
+            assert dispatch.count_running_tasks(conn)==0
+            assert not successor.pending() and not successor.read(conn,run.id)
+            assert not scopes.settled(conn,run.id)  # Cancellation remains distinct from child cleanup.
+            fresh=kb.create_task(conn,title='successor work',assignee='fixture',max_runtime_seconds=60)
+            result=dispatch.dispatch_once(conn,dry_run=True,max_spawn=1,max_in_progress=1)
+            assert [x[0] for x in result.spawned]==[fresh]
+        successor=protected.Authority(successor.policy)
+        with protected.using(successor):
+            assert dispatch.count_running_tasks(conn)==0
+        successor.retire('second-workflow')
+        third=protected.Authority({**policy,'directory':str(tmp_path/'third')},create=True)
+        third.retain_retired(successor,'second-workflow')
+        with protected.using(third):
+            assert dispatch.count_running_tasks(conn)==0
+            conn.execute('UPDATE task_runs SET claim_lock=? WHERE id=?',('forged-identity',run.id));conn.commit()
+            assert dispatch.count_running_tasks(conn)==1
 
 
 @pytest.mark.linux_only
