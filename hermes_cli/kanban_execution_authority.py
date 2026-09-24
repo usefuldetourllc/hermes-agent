@@ -80,6 +80,9 @@ class Authority:
                 claim_lock TEXT NOT NULL, profile TEXT, scope TEXT NOT NULL,
                 PRIMARY KEY(board,run_id))''')
             db.execute('CREATE TABLE IF NOT EXISTS retirement (singleton INTEGER PRIMARY KEY CHECK(singleton=1), receipt TEXT NOT NULL)')
+            db.execute('''CREATE TABLE IF NOT EXISTS retired_executions (
+                board TEXT NOT NULL, run_id INTEGER NOT NULL, original TEXT NOT NULL,
+                PRIMARY KEY(board,run_id))''')
         os.chmod(self.path, 0o600)
 
     def worker_profile(self, name):
@@ -166,6 +169,50 @@ class Authority:
                 raise RuntimeError('original protected execution ownership changed')
             db.execute('UPDATE executions SET scope=? WHERE board=? AND run_id=?',
                        (json.dumps(updated),board_path(conn),run_id))
+
+    def retain_retired(self, predecessor, context):
+        """Carry resolved ownership forward from a private, durably retired owner.
+
+        These receipts never enter the new owner's execution ledger and cannot
+        authorize work. Retain ancestors too, since all generations share a board.
+        """
+        if predecessor.directory == self.directory:
+            raise RuntimeError('separate retired predecessor required')
+        with predecessor.transaction() as db:
+            row = db.execute('SELECT receipt FROM retirement').fetchone()
+            if not row:
+                raise RuntimeError('durably retired predecessor required')
+            receipt = json.loads(row['receipt'])
+            if receipt['context'] != context or receipt['policy'] != predecessor.policy:
+                raise RuntimeError('original retirement context required')
+            originals = receipt['executions'] + [json.loads(r['original']) for r in
+                db.execute('SELECT original FROM retired_executions')]
+        if any(not self.resolved(r['scope']) for r in originals):
+            raise RuntimeError('retired predecessor contains unresolved ownership')
+        with self.transaction() as db:
+            for original in originals:
+                identity = (original['board'], original['run_id'])
+                encoded = json.dumps(original, sort_keys=True)
+                prior = db.execute('SELECT original FROM retired_executions WHERE board=? AND run_id=?', identity).fetchone()
+                if prior:
+                    if prior['original'] != encoded:
+                        raise RuntimeError('retired execution identity conflict')
+                    continue
+                if db.execute('SELECT 1 FROM executions').fetchone() or db.execute('SELECT 1 FROM retirement').fetchone():
+                    raise RuntimeError('unstarted successor owner required')
+                db.execute('INSERT INTO retired_executions VALUES(?,?,?)', (*identity, encoded))
+
+    def retired_cancellation(self, conn, row):
+        """Use private predecessor evidence, never a mutable cancellation claim."""
+        from hermes_cli.kanban_execution_cancellation import cancelled
+        with self.transaction() as db:
+            saved = db.execute('SELECT original FROM retired_executions WHERE board=? AND run_id=?',
+                               (board_path(conn), row['id'])).fetchone()
+        if not saved:
+            return False
+        original = json.loads(saved['original'])
+        return (original['task_id'] == row['task_id'] and original['claim_lock'] == row['claim_lock']
+                and cancelled(original['scope']))
 
     def retire(self, context):
         """Permanently close a reconciled owner, serialized against preparation.

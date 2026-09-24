@@ -20,7 +20,8 @@ def pending_runs(conn, task_id=None):
     from hermes_cli.kanban_execution_cancellation import cancelled
     authority = current()
     return [row for row in rows if not (row['spawn_state'] == 'settled' and authority is not None
-                                       and cancelled(authority.read(conn, row['id'])))]
+                                       and (cancelled(authority.read(conn, row['id']))
+                                            or authority.retired_cancellation(conn, row)))]
 
 
 def pending(conn, task_id):
