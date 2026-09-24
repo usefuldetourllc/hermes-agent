@@ -8,7 +8,7 @@ import time
 
 def pending_runs(conn, task_id=None):
     """Unreceipted launches and receipted terminal workers still own capacity."""
-    return conn.execute('''SELECT r.*, t.current_run_id, t.status AS task_status,
+    rows = conn.execute('''SELECT r.*, t.current_run_id, t.status AS task_status,
         t.worker_pid AS task_pid, t.worker_started_at AS task_fingerprint,
         t.claim_lock AS task_lock
         FROM task_runs r JOIN tasks t ON t.id=r.task_id
@@ -16,6 +16,11 @@ def pending_runs(conn, task_id=None):
           AND (r.spawn_state != 'receipted' OR r.ended_at IS NOT NULL))
           OR (r.execution_scope IS NOT NULL AND json_extract(r.execution_scope,'$.state') IS NOT 'settled'))
         AND (? IS NULL OR r.task_id=?)''', (task_id, task_id)).fetchall()
+    from hermes_cli.kanban_execution_authority import current
+    from hermes_cli.kanban_execution_cancellation import cancelled
+    authority = current()
+    return [row for row in rows if not (row['spawn_state'] == 'settled' and authority is not None
+                                       and cancelled(authority.read(conn, row['id'])))]
 
 
 def pending(conn, task_id):
@@ -108,6 +113,12 @@ def reconcile(conn, task_id):
     with kb.write_txn(conn, allow_nested=True):
         for row in pending_runs(conn, task_id):
             if row['execution_scope'] is not None:
+                from hermes_cli.kanban_execution_cancellation import cancelled, project
+                from hermes_cli.kanban_execution_authority import current
+                authority = current()
+                if authority is not None and cancelled(authority.read(conn, row['id'])):
+                    project(conn, row['id'])
+                    continue
                 if scopes.settled(conn, row['id']):
                     cleanup_verified(conn, task_id, row['id'], row['worker_pid'], row['worker_started_at'])
                 continue

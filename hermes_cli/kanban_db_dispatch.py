@@ -1283,6 +1283,7 @@ def _record_task_failure(
     release_claim: bool = False,
     end_run: bool = False,
     event_payload_extra: Optional[dict] = None,
+    allow_nested: bool = False,
 ) -> bool:
     """Record a non-success outcome and maybe trip the circuit breaker; every
     non-success path funnels through here so ``consecutive_failures`` stays
@@ -1299,7 +1300,7 @@ def _record_task_failure(
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
     error = error[:500]
-    with _kb.write_txn(conn):
+    with _kb.write_txn(conn, allow_nested=allow_nested):
         row = conn.execute(
             "SELECT consecutive_failures, status, max_retries, current_run_id "
             "FROM tasks WHERE id = ?", (task_id,),
@@ -1991,6 +1992,15 @@ def _dispatch_lane_task(
         return True
     except Exception as exc:
         spawn_ownership.uncertain(conn, claimed, exc)
+        if authority is not None:
+            from hermes_cli.kanban_execution_cancellation import cancel
+            try:
+                if cancel(conn, claimed.current_run_id):
+                    result.auto_blocked.append(claimed.id)
+                    return False
+            except Exception:
+                # A lost cancellation reply retains the private slot for reconciliation.
+                _kb._log.warning('Protected prelaunch cancellation remains unresolved')
         # The original run remains running and counts against all spawn caps.
         # Callback failure is not proof that a process was never created.
         _count_spawn(claimed.assignee)

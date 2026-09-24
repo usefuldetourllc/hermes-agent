@@ -2123,7 +2123,9 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
             task_id = row["id"]
             cur_status = row["status"]
             from hermes_cli.kanban_worker_failure import protocol_breaker_tripped
-            if cur_status == "blocked" and (_has_sticky_block(conn, task_id) or protocol_breaker_tripped(conn, task_id)):
+            from hermes_cli.kanban_execution_cancellation import blocks_automatic_retry
+            if cur_status == "blocked" and (_has_sticky_block(conn, task_id)
+                    or protocol_breaker_tripped(conn, task_id) or blocks_automatic_retry(conn, task_id)):
                 # Explicit human-intervention block; only ``unblock_task`` may exit it.
                 continue
             parents = conn.execute(
