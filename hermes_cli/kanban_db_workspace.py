@@ -59,6 +59,14 @@ def _managed_scratch_path_info(p: Path) -> tuple[bool, Optional[str]]:
     if override:
         with contextlib.suppress(OSError):
             roots.append((Path(override).expanduser().resolve(strict=False), None))
+    from hermes_cli.kanban_protected_workspace import default_root
+    protected_root = default_root()
+    if protected_root is not None:
+        # Root-side cleanup must recognize the same board roots sent to workers.
+        with contextlib.suppress(OSError):
+            for entry in protected_root.parent.iterdir():
+                if entry.is_dir() and not entry.is_symlink():
+                    roots.append((entry.resolve(strict=False), entry.name))
     try:
         home = _kb.kanban_home()
     except OSError:
@@ -445,7 +453,8 @@ def _anchored_worktree(repo_root: Path, task_id: str, branch_name: str) -> tuple
     return target, branch_name
 
 
-def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> tuple[Path, str]:
+def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None,
+                                default_workdir: Optional[str] = None) -> tuple[Path, str]:
     """Resolve + materialize a linked git worktree for ``task``. With no
     ``task.workspace_path`` the anchor is the board's ``default_workdir`` so
     every worktree lands under a board-owned repo (``<repo>/.worktrees/<id>``)
@@ -454,7 +463,8 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
     branch_name = (task.branch_name or "").strip() or f"wt/{task.id}"
     if not task.workspace_path:
         board_slug = board if board else _kb.get_current_board()
-        board_default = (_kb.read_board_metadata(board_slug).get("default_workdir") or "").strip()
+        board_default = (default_workdir if default_workdir is not None else
+                         _kb.read_board_metadata(board_slug).get("default_workdir") or "").strip()
         if not board_default:
             raise ValueError(
                 f"task {task.id} has workspace_kind=worktree but no workspace_path, "

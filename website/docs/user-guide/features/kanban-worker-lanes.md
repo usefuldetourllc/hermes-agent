@@ -46,6 +46,30 @@ For Hermes profile lanes, the dispatcher's `_default_spawn` runs `hermes -p <ass
 
 For non-Hermes lanes (registered via a plugin), the plugin supplies its own `spawn_fn` callable that gets `task`, `workspace`, and `board` and returns an optional pid for crash detection.
 
+### Protected Linux workspace access
+
+With `kanban.execution_authority` enabled, workspace creation and Git checkout run
+inside the supervised worker after it drops to the configured worker UID/GID.
+Git hooks and filters therefore share the worker's deadline and cleanup ownership.
+The actual workspace path and branch are saved for the original claim before the
+worker loads its profile or starts the task. The dispatch-time spawn callback
+contains a requested path; a worktree's final path becomes available on the card
+once workspace preparation succeeds.
+
+Protected default scratch storage is `<profiles_directory>/../workspaces/<board>`,
+outside the private control home. The dispatcher, worker and completion cleanup
+use that same root. An explicit `HERMES_KANBAN_WORKSPACES_ROOT` still takes precedence.
+The root dispatcher grants ownership only for a newly created default scratch
+directory. A newly created default board workspace parent is root-owned, belongs to the worker
+group, and uses sticky mode `1770`, allowing workers to remove their own finished
+scratch directories. Existing parents retain their permissions; configured scratch
+roots need appropriate worker cleanup access. All ancestors must allow worker traversal. Existing directories are never
+recursively chowned. Explicit scratch/dir paths must be writable by the worker;
+new ones need a worker-writable parent. Worktree repositories (including their
+Git metadata) must already be available to the worker account. Inaccessible
+existing paths fail startup and retain their permissions; provision appropriate
+worker storage rather than granting access to the private authority directory.
+
 ### Descendant process scope
 
 A task assignment belongs to the dispatcher worker, not to every program it starts.
@@ -140,3 +164,29 @@ So lane authors don't have to reimplement these:
 - [Kanban overview](./kanban) — the user-facing intro.
 - [Kanban tutorial](./kanban-tutorial) — walkthrough with the dashboard open.
 - [`KANBAN_GUIDANCE`](https://github.com/NousResearch/hermes-agent/blob/main/agent/prompt_builder.py) — the worker + orchestrator lifecycle injected into every kanban worker's system prompt.
+
+### Optional protected execution admission
+
+An operator can add `admission_command` (an argv list beginning with an absolute,
+root-controlled executable) to the opt-in `kanban.execution_authority` policy.
+The private authority latches that policy; removing configuration does not return
+its pending executions to ordinary spawning. The adapter and its dependencies
+must be trusted, root-controlled code. Model workers must not receive its keys
+or reusable control-plane credentials.
+
+The adapter receives a bounded JSON request on stdin with contract
+`protected-execution-admission-v1`, phase, original board/run and latched authority
+policy. It must read original execution identity through
+`Authority.original_execution`, not trust the worker-writable board projection.
+The phases are `prepare` (receipt plus earlier absolute deadline), `launch`
+(one-shot authorization before workspace code), `check` (current original owner
+after workspace preparation, before model exec), and `cleanup` (acknowledged
+original private ECHILD receipt). Replies are bounded JSON on stdout. Adapter
+failure has no unguarded fallback, and stderr is not copied into worker logs.
+
+The private ledger retains the prepared task snapshot, grant reference and
+launch/input attempt markers. Lost launch responses close the worker gate.
+Cleanup response loss retains local occupancy; later dispatcher ticks retry only
+the original cleanup receipt. Custom spawn callbacks and direct protected spawn
+without its original supervised scope are refused. Enabling this interface alone
+does not qualify an adapter or authorize a production rollout.
