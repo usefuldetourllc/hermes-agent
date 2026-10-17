@@ -1241,6 +1241,13 @@ supervisor stops its children and escalates after a short cleanup grace period.
 A reclaim may therefore initially report that ownership is still held; retry
 after cleanup completes. Cleanup receipts survive event-log pruning and restart.
 
+With a protected root dispatcher, the complete task travels in a sealed file
+descriptor and is consumed after the worker drops privilege and passes its launch
+gates. Task bodies are not placed in process arguments or the exec environment,
+so Linux's per-string argument limit does not truncate or prevent large-input
+launches. The sealed launch packet has a 4 MiB limit including JSON escaping;
+oversized packets are rejected, never shortened.
+
 The cleanup supervisor and model worker have distinct process identities. The
 supervisor records the worker's PID and start fingerprint before releasing its
 launch gate; that identity survives exec and authenticates provider-failure

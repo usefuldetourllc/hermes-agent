@@ -119,6 +119,7 @@ def _worker_entry(read_fd, deadline, argv, env_fd=None, ready_fd=None, final_fd=
     if not granted(read_fd): return 1
     if deadline is not None and time.time() >= deadline: return 1
     env = os.environ
+    request = None
     if env_fd is not None:
         from hermes_cli.kanban_execution_authority import read_environment
         env = read_environment(env_fd)
@@ -142,17 +143,25 @@ def _worker_entry(read_fd, deadline, argv, env_fd=None, ready_fd=None, final_fd=
     # Git checkout/configuration may have consumed the remaining launch time.
     if deadline is not None and time.time() >= deadline:
         return 1
+    profile_prefix = [sys.executable, '-I', str(Path(__file__).resolve()), '--profile-worker']
+    if argv[:4] == profile_prefix:
+        if len(argv) != 6 or request is None:
+            raise RuntimeError('sealed original profile task required')
+        # The full task already arrived in the sealed workspace descriptor.
+        # Consume it here after both gates and the UID drop; never put its body
+        # in argv or an exec environment (Linux caps each string at ~128 KiB).
+        import json
+        return _profile_worker_entry(json.loads(request)['task'], argv[4], argv[5])
     os.execvpe(argv[0], argv, env)
 
 
-def _profile_worker_entry(task_json, profile, home):
+def _profile_worker_entry(task_data, profile, home):
     """Only the dropped-UID process may load its writable runtime profile."""
-    import json
     if os.geteuid() == 0:
         raise RuntimeError('worker profile loading requires dropped privilege')
     from hermes_cli.kanban_db import Task
     from hermes_cli.kanban_db_dispatch import _worker_argv
-    command = _worker_argv(Task(**json.loads(task_json)), profile, home, isolated_source=True)
+    command = _worker_argv(Task(**task_data), profile, home, isolated_source=True)
     os.execvpe(command[0], command, os.environ)
 
 
@@ -231,8 +240,6 @@ if __name__ == '__main__':
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     if sys.argv[1] == '--cli-worker':
         raise SystemExit(_cli_worker_entry(sys.argv[2:]))
-    if sys.argv[1] == '--profile-worker':
-        raise SystemExit(_profile_worker_entry(*sys.argv[2:]))
     if sys.argv[1] == '--worker':
         _, read_fd, deadline, *command = sys.argv[1:]
         env_fd = None
