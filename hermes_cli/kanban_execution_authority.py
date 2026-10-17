@@ -37,7 +37,7 @@ class Authority:
         if sys.platform != 'linux' or os.geteuid() != 0:
             raise RuntimeError('protected execution requires a Linux root dispatcher')
         if (not isinstance(policy, dict) or not {'directory', 'profiles_directory', 'worker_uid', 'worker_gid'} <= set(policy)
-                or set(policy) - {'directory', 'profiles_directory', 'worker_uid', 'worker_gid', 'admission_command'}
+                or set(policy) - {'directory', 'profiles_directory', 'worker_uid', 'worker_gid', 'admission_command', 'worker_commands'}
                 or any(type(policy[k]) is not int or policy[k] <= 0 for k in ('worker_uid', 'worker_gid'))
                 or any(not isinstance(policy[k], str) or not Path(policy[k]).is_absolute()
                        for k in ('directory', 'profiles_directory'))):
@@ -50,6 +50,8 @@ class Authority:
                 raise RuntimeError('trusted absolute admission command required')
             for arg in command:
                 if Path(arg).is_absolute(): protected_path(arg)
+        from hermes_cli.kanban_external_worker import validate_commands
+        validate_commands(policy)
         self.policy = dict(policy)
         self.profiles_directory = protected_path(policy['profiles_directory'])
         if self.profiles_directory.name != 'profiles' or not self.profiles_directory.is_dir():

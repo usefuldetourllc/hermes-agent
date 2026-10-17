@@ -2538,9 +2538,13 @@ def _worker_argv(task: Task, profile_arg: str, hermes_home: Optional[str], *, is
     """Build the ``hermes -p <profile> --cli ... chat -q ...`` worker command."""
     from hermes_cli.kanban_execution_authority import current as execution_authority
     if sys.platform == 'linux' and os.geteuid() == 0 and execution_authority() is not None:
+        # The operator's latched policy, never a task/profile, selects external code.
+        command = execution_authority().policy.get('worker_commands', {}).get(profile_arg)
+        prefix = [sys.executable, '-I', str(Path(__file__).with_name('kanban_execution_supervisor.py'))]
+        if command:
+            return [*prefix, '--external-worker', *command]
         # Defer profile/config/plugin access to a fresh unprivileged process.
-        return [sys.executable, '-I', str(Path(__file__).with_name('kanban_execution_supervisor.py')),
-                '--profile-worker', profile_arg, str(hermes_home)]
+        return [*prefix, '--profile-worker', profile_arg, str(hermes_home)]
     executable = ([sys.executable, '-I', str(Path(__file__).with_name('kanban_execution_supervisor.py')),
                    '--cli-worker'] if isolated_source else _resolve_hermes_argv())
     cmd = [

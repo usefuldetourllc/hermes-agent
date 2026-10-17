@@ -136,6 +136,12 @@ def _worker_entry(read_fd, deadline, argv, env_fd=None, ready_fd=None, final_fd=
             workspace = env.get('TERMINAL_CWD')
             if workspace and Path(workspace).is_dir(): os.chdir(workspace)
         env = os.environ
+    external_prefix = [sys.executable, '-I', str(Path(__file__).resolve()), '--external-worker']
+    if argv[:4] == external_prefix:
+        # CAO/tool runtime preparation must finish BEFORE the parent's final
+        # admission check. Transfer the existing gates to the trusted launcher.
+        from hermes_cli.kanban_external_worker import execute
+        return execute(argv[4:], request, ready_fd, final_fd, deadline)
     if ready_fd is not None:
         try: os.write(ready_fd, b'1')
         finally: os.close(ready_fd)
