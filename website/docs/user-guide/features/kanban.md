@@ -1248,6 +1248,19 @@ so Linux's per-string argument limit does not truncate or prevent large-input
 launches. The sealed launch packet has a 4 MiB limit including JSON escaping;
 oversized packets are rejected, never shortened.
 
+An operator-installed external runtime can be selected per profile using the
+protected authority's optional `worker_commands` mapping. Each value is an
+absolute, root-controlled command, fixed when the authority is created; tasks
+and writable profiles cannot replace it. This requires `admission_command`.
+The worker still drops privilege and resolves its workspace before exec. Its
+command receives `--request-fd`, `--ready-fd`, `--final-gate-fd` and `--deadline`.
+Use `kanban_external_worker.read_request` for the sealed original request, prepare
+the runtime without delivering input, then call `input_gate` once immediately
+before the first model input. A denied or expired gate must exit without sending.
+The original supervisor continues to own all runtime/tool descendants and cleanup.
+AgentOps uses this protocol to prepare a dedicated CAO terminal before the final
+approval check. Omitting `worker_commands` preserves the ordinary Hermes worker.
+
 The cleanup supervisor and model worker have distinct process identities. The
 supervisor records the worker's PID and start fingerprint before releasing its
 launch gate; that identity survives exec and authenticates provider-failure
