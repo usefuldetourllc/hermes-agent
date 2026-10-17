@@ -2538,10 +2538,9 @@ def _worker_argv(task: Task, profile_arg: str, hermes_home: Optional[str], *, is
     """Build the ``hermes -p <profile> --cli ... chat -q ...`` worker command."""
     from hermes_cli.kanban_execution_authority import current as execution_authority
     if sys.platform == 'linux' and os.geteuid() == 0 and execution_authority() is not None:
-        from dataclasses import asdict
         # Defer profile/config/plugin access to a fresh unprivileged process.
         return [sys.executable, '-I', str(Path(__file__).with_name('kanban_execution_supervisor.py')),
-                '--profile-worker', json.dumps(asdict(task)), profile_arg, str(hermes_home)]
+                '--profile-worker', profile_arg, str(hermes_home)]
     executable = ([sys.executable, '-I', str(Path(__file__).with_name('kanban_execution_supervisor.py')),
                    '--cli-worker'] if isolated_source else _resolve_hermes_argv())
     cmd = [

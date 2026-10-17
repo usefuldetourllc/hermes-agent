@@ -277,6 +277,11 @@ def current():
     return authority
 
 
+# Includes the complete task in a JSON workspace request, with nested escaping.
+# This sealed descriptor is consumed before exec; it is not an exec environment.
+MAX_WORKER_ENV_BYTES = 4 * 1024 * 1024
+
+
 def environment_fd(value):
     import fcntl
     if sys.platform != 'linux':
@@ -290,7 +295,7 @@ def environment_fd(value):
              | getattr(fcntl, 'F_SEAL_GROW', 0x0004)
              | getattr(fcntl, 'F_SEAL_WRITE', 0x0008))
     data = json.dumps(value).encode()
-    if len(data) > 256 * 1024 or not isinstance(value, dict) or not all(isinstance(k,str) and isinstance(v,str) for k,v in value.items()):
+    if len(data) > MAX_WORKER_ENV_BYTES or not isinstance(value, dict) or not all(isinstance(k,str) and isinstance(v,str) for k,v in value.items()):
         raise RuntimeError('invalid protected worker environment')
     fd = os.memfd_create('kanban-worker-environment', os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
     try:
@@ -305,9 +310,9 @@ def environment_fd(value):
 
 def read_environment(fd):
     try:
-        with os.fdopen(fd,'rb') as source:data=source.read(256*1024+1)
+        with os.fdopen(fd,'rb') as source:data=source.read(MAX_WORKER_ENV_BYTES+1)
         value=json.loads(data)
-        if len(data)>256*1024 or not isinstance(value,dict) or not all(isinstance(k,str) and isinstance(v,str) for k,v in value.items()):
+        if len(data)>MAX_WORKER_ENV_BYTES or not isinstance(value,dict) or not all(isinstance(k,str) and isinstance(v,str) for k,v in value.items()):
             raise RuntimeError('invalid protected worker environment')
         return value
     except (ValueError,TypeError):
