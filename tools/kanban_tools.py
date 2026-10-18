@@ -527,6 +527,28 @@ def inject_new_comments_from_env(agent: Any) -> bool:
         return False
 
 
+def completion_schema_context():
+    """Immutable task identity for the definitions cache, scoped to its board."""
+    from agent.delegation_context import owned_kanban_task
+    from hermes_cli.kanban_db import kanban_db_path
+    tid = owned_kanban_task()
+    return (str(kanban_db_path().resolve()), tid) if tid else None
+
+
+def rewrite_completion_schema(td, available):
+    context = completion_schema_context()
+    if context is None:
+        return td
+    from hermes_cli.kanban_text_artifact import PREFIX, completion_parameters
+    with _board(None) as (kb, conn):
+        task = kb.get_task(conn, context[1])
+        if task is None or not (task.completion_contract or "").startswith(PREFIX):
+            return td
+        return {**td, "function": {**td["function"],
+            "description": "Complete the assigned task with its full source-bound text artifact.",
+            "parameters": completion_parameters(task.completion_contract, task.id)}}
+
+
 # --- Handlers ---
 
 @_kanban_handler("kanban_show")

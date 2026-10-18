@@ -252,6 +252,11 @@ def get_tool_definitions(enabled_toolsets: Optional[List[str]] = None, disabled_
     return list(cached)
 
 
+def _kanban_completion_context():
+    from tools.kanban_tools import completion_schema_context
+    return completion_schema_context()
+
+
 def _tool_defs_cache_key(
     enabled_toolsets: Optional[List[str]], disabled_toolsets: Optional[List[str]], skip_tool_search_assembly: bool,
 ) -> Optional[tuple]:
@@ -273,7 +278,7 @@ def _tool_defs_cache_key(
     return (
         registry.current_scope_key(), frozenset(enabled_toolsets) if enabled_toolsets is not None else None,
         frozenset(disabled_toolsets) if disabled_toolsets else None, registry._generation, cfg_fp,
-        bool(os.environ.get("HERMES_KANBAN_TASK")), bool(skip_tool_search_assembly),
+        _kanban_completion_context(), bool(skip_tool_search_assembly),
         _is_delegated_child_context(), _is_dispatcher_owned_worker(), profile_scope,
     )
 
@@ -460,7 +465,13 @@ def _compose_rewriters(*fns):
     return run
 
 
+def _rewrite_kanban_complete(td, available):
+    from tools.kanban_tools import rewrite_completion_schema
+    return rewrite_completion_schema(td, available)
+
+
 _DYNAMIC_SCHEMA_REWRITERS = {
+    "kanban_complete": _rewrite_kanban_complete,
     "execute_code": _rewrite_execute_code,
     "discord": _discord_rewriter("get_dynamic_schema_core"),
     "discord_admin": _discord_rewriter("get_dynamic_schema_admin"),
