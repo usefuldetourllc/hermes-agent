@@ -289,6 +289,22 @@ def _require_dict_metadata(metadata: Any) -> None:
            f"metadata must be an object/dict, got {type(metadata).__name__}")
 
 
+def _handoff_metadata(args: dict) -> Optional[dict]:
+    """String transport for providers that cannot express free-form objects."""
+    metadata = args.get("metadata")
+    encoded = args.get("metadata_json")
+    if encoded is not None:
+        _check(metadata is None or metadata == {}, "provide metadata or metadata_json, not both")
+        _check(isinstance(encoded, str), "metadata_json must be a JSON object string")
+        try:
+            metadata = json.loads(encoded)
+        except ValueError:
+            raise ValueError("metadata_json must be valid JSON") from None
+        _check(isinstance(metadata, dict), "metadata_json must encode an object")
+    _require_dict_metadata(metadata)
+    return metadata
+
+
 def _merge_artifacts(metadata: Any, artifacts: list[str]) -> dict:
     """Fold ``artifacts`` into ``metadata["artifacts"]`` (merged with, never overwriting, a
     list the worker passed manually). Artifacts ride inside metadata so the completed-event
@@ -567,7 +583,7 @@ def _handle_complete(args: dict, **kw) -> str:
     tid = _worker_guard("kanban_complete", args)
     summary = _redact_opt(args.get("summary"))
     result = _redact_opt(args.get("result"))
-    metadata = args.get("metadata")
+    metadata = _handoff_metadata(args)
     if isinstance(metadata, dict):
         # Keep the unredacted dict if the redacted JSON cannot be re-parsed.
         metadata = _redact_metadata(metadata) or metadata
@@ -661,7 +677,7 @@ def _handle_request_review(args: dict, **kw) -> str:
     summary = _redact(_require_text(
         args, "summary", "summary is required — describe what was implemented and how it "
         "was verified so the reviewer has context"))
-    metadata = args.get("metadata")
+    metadata = _handoff_metadata(args)
     _require_dict_metadata(metadata)
     if metadata is not None:
         metadata = _redact_metadata(metadata)
