@@ -41,6 +41,32 @@ def parse_contract(value: str) -> dict:
     return contract
 
 
+def completion_parameters(value: str, task_id: str) -> dict:
+    """Canonical worker handoff, derived from the immutable creation contract.
+
+    Plain required properties survive provider schema normalization. Historical
+    metadata_json/result callers remain readable at the database boundary.
+    """
+    contract = parse_contract(value)
+    fixed = {**contract["identity"], "task_id": task_id, "complete": True,
+             "truncated": False, "evidence_source": contract["evidence_source"]}
+    types = {str: "string", int: "integer", bool: "boolean"}
+    properties = {k: {"type": types[type(v)], "enum": [v]} for k, v in fixed.items()}
+    properties["text"] = {"type": "string", "minLength": 1, "pattern": r"\S",
+                          "maxLength": contract["max_characters"],
+                          "description": "Full artifact text, distinct from the short summary."}
+    artifact = {"type": "object", "properties": properties,
+                "required": list(properties), "additionalProperties": False}
+    key = contract["metadata_key"]
+    return {"type": "object", "properties": {
+        "task_id": {"type": "string", "enum": [task_id]},
+        "summary": {"type": "string", "minLength": 1, "pattern": r"\S",
+                    "description": "Short completion summary; full text belongs in the artifact."},
+        "metadata": {"type": "object", "properties": {key: artifact},
+                     "required": [key], "additionalProperties": False}},
+        "required": ["task_id", "summary", "metadata"], "additionalProperties": False}
+
+
 def require_artifact(conn, task_id: str, metadata: dict | None, summary: str | None) -> None:
     """Run inside complete_task's write transaction, before any terminal mutation."""
     row = conn.execute(

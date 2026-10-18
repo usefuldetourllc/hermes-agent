@@ -29,3 +29,11 @@ Idempotent creation refuses a changed contract, including dropping it. Existing
 local-only/PR tasks and historical completed runs are unchanged. This enforces
 handoff structure and declared identity; it does not establish semantic quality,
 independent review, implementation approval, or authorize a model retry.
+
+Dispatcher-owned workers receive a task-specific `kanban_complete` schema with
+required `task_id`, nonblank `summary`, and typed `metadata[metadata_key]`. Its
+identity values, complete/untruncated flags, evidence source and text bound derive
+from the creation contract. This schema uses ordinary required properties so it
+survives provider normalization. Schema caching is scoped to the board and task;
+the creation contract is immutable for the life of that task. Generic tasks and
+historical `result`/`metadata_json` inputs retain their existing readers.

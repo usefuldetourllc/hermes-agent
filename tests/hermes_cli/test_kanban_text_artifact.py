@@ -92,3 +92,61 @@ def test_contract_cannot_be_substituted_or_bypassed_by_direct_completion(tmp_pat
         assert not kb.list_runs(conn, tid)
         legacy = kb.create_task(conn, title="Generic task", assignee="architecture")
         assert kb.complete_task(conn, legacy, summary="Legacy completion remains supported")
+
+
+def test_model_wire_schema_is_task_bound_stable_and_enforces_complete_handoff(tmp_path, monkeypatch):
+    import httpx
+    from openai import OpenAI
+    from jsonschema import Draft202012Validator
+    from model_tools import get_tool_definitions
+    from tools.registry import registry
+
+    monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
+    monkeypatch.setenv("HERMES_PROFILE", "architecture")
+    held = []
+    for name, task_key, bound in (("a", "first", 30), ("a", "second", 40),
+                                  ("b", "first", 40), ("a", "first", 30)):
+        home = tmp_path / name
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        monkeypatch.setenv("HERMES_KANBAN_HOME", str(home))
+        monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+        kb.init_db()
+        with connect() as conn:
+            tid = kb.create_task(conn, title="Advice", assignee="architecture",
+                idempotency_key=task_key, completion_contract=contract(max_characters=bound))
+            if len(held) < 3:
+                assert kb.claim_task(conn, tid)
+            monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+            definitions = get_tool_definitions(enabled_toolsets=["kanban"], quiet_mode=True)
+            wire = []
+            def capture(request):
+                wire.append(json.loads(request.content))
+                return httpx.Response(200, json={"id":"fixture", "object":"chat.completion",
+                    "created":0, "model":"fixture", "choices":[{"index":0,
+                    "message":{"role":"assistant", "content":"Done"}, "finish_reason":"stop"}]})
+            with OpenAI(api_key="synthetic", http_client=httpx.Client(transport=httpx.MockTransport(capture))) as client:
+                client.chat.completions.create(model="fixture", messages=[{"role":"user","content":"Complete"}], tools=definitions)
+            schema = next(t["function"]["parameters"] for t in wire[0]["tools"] if t["function"]["name"] == "kanban_complete")
+            held.append((tid, copy.deepcopy(schema), definitions))
+            if len(held) == 4:
+                assert schema == held[0][1]
+                assert held[0][2] == definitions
+                assert schema != held[1][1] and schema != held[2][1]
+                break
+            validator = Draft202012Validator(schema)
+            artifact = {**json.loads(contract().split(":",1)[1])["identity"], "task_id":tid,
+                "complete":True,"truncated":False,"evidence_source":"hermes_completion_metadata",
+                "text":"Complete source-bound advice"}
+            valid = {"task_id":tid,"summary":"Advice ready","metadata":{"advice_artifact":artifact}}
+            invalid = [{}, {"summary":"Ready"}, {**valid,"summary":" "}, {**valid,"metadata":{}},
+                {**valid,"metadata":{"advice_artifact":{}}}]
+            for key, value in (("task_id","wrong"),("source_revision_key","wrong"),
+                               ("text","x"*41),("text"," "),("truncated",True)):
+                invalid.append({**valid,"metadata":{"advice_artifact":{**artifact,key:value}}})
+            for args in invalid:
+                assert list(validator.iter_errors(args)), args
+                assert "error" in json.loads(registry.dispatch("kanban_complete",args))
+                assert kb.get_task(conn, tid).status == "running"
+            validator.validate(valid)
+            assert json.loads(registry.dispatch("kanban_complete",valid))["ok"]
+            assert kb.latest_run(conn, tid).metadata["advice_artifact"] == artifact
