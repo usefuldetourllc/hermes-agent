@@ -91,7 +91,7 @@ KANBAN_COMPLETE_SCHEMA = _schema(
         "Mark your current task done with a structured handoff for "
         "downstream workers and humans. Prefer ``summary`` for a "
         "human-readable 1-3 sentence description of what you did; put "
-        "machine-readable facts in ``metadata`` (changed_files, "
+        "machine-readable facts in ``metadata`` or ``metadata_json`` (changed_files, "
         "tests_run, decisions, findings, etc). At least one of "
         "``summary`` or ``result`` is required. If you created new "
         "tasks via ``kanban_create`` during this run, list their ids "
@@ -110,6 +110,13 @@ KANBAN_COMPLETE_SCHEMA = _schema(
                 "Human-readable handoff, 1-3 sentences. Appears in "
                 "Run History on the dashboard and in downstream "
                 "workers' context."
+        )),
+        "metadata_json": _prop("string", (
+            "JSON-encoded object containing the complete structured handoff metadata. "
+            "Prefer this for nested artifacts or arbitrary keys when the provider's "
+            "object schema only allows empty metadata. Include the full artifact, "
+            "not a file path. Omit metadata or leave it empty when using this field; "
+            "the decoded object passes the same completion and review checks."
         )),
         "metadata": _prop("object", (
                 "Free-form dict of structured facts about this "
@@ -220,6 +227,13 @@ KANBAN_REQUEST_REVIEW_SCHEMA = _schema(
         "reviewer": _prop("string", (
                 "Optional reviewer profile. When provided, the task is "
                 "reassigned to that profile before review dispatch."
+        )),
+        "metadata_json": _prop("string", (
+            "JSON-encoded object containing the complete structured handoff metadata. "
+            "Prefer this for nested artifacts or arbitrary keys when the provider's "
+            "object schema only allows empty metadata. Include the full artifact, "
+            "not a file path. Omit metadata or leave it empty when using this field; "
+            "the decoded object passes the same completion and review checks."
         )),
         "metadata": {
             "type": "object",

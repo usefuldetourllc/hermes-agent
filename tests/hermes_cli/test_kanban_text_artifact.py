@@ -17,7 +17,8 @@ def contract(**changes):
     return "text-artifact-v1:" + json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
-def test_tool_handoff_rejects_incomplete_or_mismatched_artifacts_then_releases_exact_text(tmp_path, monkeypatch):
+@pytest.mark.parametrize("transport", ["metadata", "metadata_json"])
+def test_tool_handoff_rejects_incomplete_or_mismatched_artifacts_then_releases_exact_text(tmp_path, monkeypatch, transport):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("HERMES_PROFILE", "architecture")
     monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
@@ -46,15 +47,16 @@ def test_tool_handoff_rejects_incomplete_or_mismatched_artifacts_then_releases_e
             {"advice_artifact": {**artifact, "evidence_source": "invented"}}]
         for metadata in invalid:
             result = json.loads(registry.dispatch("kanban_complete", {
-                "summary": "Short summary", "metadata": copy.deepcopy(metadata), "artifacts": [str(attachment)]}))
-            assert "Completion requires metadata.advice_artifact" in result["error"]
+                "summary": "Short summary", transport: (json.dumps(metadata) if transport == "metadata_json" else copy.deepcopy(metadata)), "artifacts": [str(attachment)]}))
+            expected = "metadata_json must encode an object" if transport == "metadata_json" and metadata is None else "Completion requires metadata.advice_artifact"
+            assert expected in result["error"]
             task = kb.get_task(conn, tid)
             assert task.status == "running" and task.current_run_id == run_id
             assert kb.latest_run(conn, tid).ended_at is None
             assert kb.get_task(conn, child).status == "todo"
             assert attachment.read_text() == artifact["text"]
         result = json.loads(registry.dispatch("kanban_complete", {
-            "summary": "Short summary", "metadata": {"advice_artifact": artifact}}))
+            "summary": "Short summary", transport: (json.dumps({"advice_artifact": artifact}) if transport == "metadata_json" else {"advice_artifact": artifact})}))
         assert result["ok"]
         assert kb.get_task(conn, tid).status == "done"
         assert kb.get_task(conn, child).status == "ready"

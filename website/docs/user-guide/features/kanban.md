@@ -464,6 +464,8 @@ the summary is the human-readable closeout, and `metadata` is the
 machine-readable handoff that downstream agents, reviewers, or dashboards can
 reuse without scraping prose.
 
+If a provider cannot express arbitrary keys in the object parameter, both `kanban_complete` and `kanban_request_review` also accept `metadata_json`, a JSON string encoding the same complete object. Omit `metadata` (or leave it empty) when using it. The decoded object goes through the same ownership and completion checks.
+
 For engineering and review tasks, prefer this optional metadata shape:
 
 ```json
