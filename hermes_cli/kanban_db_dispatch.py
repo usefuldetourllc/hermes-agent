@@ -1798,6 +1798,7 @@ def dispatch_once(
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
+    allowed_task_ids: Optional[frozenset[str]] = None,
 ) -> DispatchResult:
     """Run one dispatcher tick under the board's single-writer lock.
 
@@ -1806,7 +1807,17 @@ def dispatch_once(
     frames. The loser returns an empty ``DispatchResult`` with
     ``skipped_locked=True`` and writes nothing; the lock is keyed on the
     resolved DB path so unrelated boards tick in parallel.
+    An explicit task set limits new claims in both ready and review lanes.
+    Empty means cleanup only. Reconciliation and capacity accounting remain
+    board-wide so excluded work cannot lose its original cleanup owner.
     """
+    if allowed_task_ids is not None:
+        if not isinstance(allowed_task_ids, (set, frozenset, list, tuple)) or any(
+            not isinstance(task_id, str) or not task_id for task_id in allowed_task_ids
+        ):
+            raise ValueError("allowed_task_ids must contain nonempty task IDs")
+        allowed_task_ids = frozenset(allowed_task_ids)
+
     def _locked_tick() -> DispatchResult:
         return _dispatch_once_locked(
             conn,
@@ -1821,6 +1832,7 @@ def dispatch_once(
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
             reconcile_orphans=reconcile_orphans,
+            allowed_task_ids=allowed_task_ids,
         )
 
     try:
@@ -2180,6 +2192,7 @@ def _dispatch_once_locked(
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
+    allowed_task_ids: Optional[frozenset[str]] = None,
 ) -> DispatchResult:
     """One dispatcher tick: reclaim stale/crashed running tasks, promote
     todo -> ready, then atomically claim each spawnable ready/review row and
@@ -2207,6 +2220,9 @@ def _dispatch_once_locked(
     # Review rows are enumerated up front so the budget split can see whether
     # review work exists at all.
     review_rows = _lane_rows(conn, "review") if review_dispatch_enabled() else []
+    if allowed_task_ids is not None:
+        ready_rows = [row for row in ready_rows if row["id"] in allowed_task_ids]
+        review_rows = [row for row in review_rows if row["id"] in allowed_task_ids]
     # Review-lane reservation: the ready loop runs first and would otherwise
     # consume the ENTIRE shared budget, starving reviews under a sustained ready
     # backlog. When spawnable review work exists and there is any budget, hold
