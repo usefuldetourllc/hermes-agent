@@ -171,6 +171,13 @@ KANBAN_COMPLETE_SCHEMA = _schema(
     [],
 )
 
+# The handler requires a nonblank handoff. Express the same alternative here;
+# declaring both fields optional allowed schema-valid calls that could never finish.
+KANBAN_COMPLETE_SCHEMA["parameters"]["anyOf"] = [
+    {"required": [field], "properties": {field: {"type": "string", "pattern": r"\S"}}}
+    for field in ("summary", "result")
+]
+
 KANBAN_BLOCK_SCHEMA = _schema(
     "kanban_block",
     (
