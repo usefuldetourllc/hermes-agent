@@ -52,7 +52,8 @@ def completion_parameters(value: str, task_id: str) -> dict:
              "truncated": False, "evidence_source": contract["evidence_source"]}
     types = {str: "string", int: "integer", bool: "boolean"}
     properties = {k: {"type": types[type(v)], "enum": [v]} for k, v in fixed.items()}
-    properties["text"] = {"type": "string", "minLength": 1, "pattern": r"\S",
+    # Accept full prose even when a constrained decoder anchors the pattern.
+    properties["text"] = {"type": "string", "minLength": 1, "pattern": r"[\s\S]*\S[\s\S]*",
                           "maxLength": contract["max_characters"],
                           "description": "Full artifact text, distinct from the short summary."}
     artifact = {"type": "object", "properties": properties,
@@ -60,7 +61,7 @@ def completion_parameters(value: str, task_id: str) -> dict:
     key = contract["metadata_key"]
     return {"type": "object", "properties": {
         "task_id": {"type": "string", "enum": [task_id]},
-        "summary": {"type": "string", "minLength": 1, "pattern": r"\S",
+        "summary": {"type": "string", "minLength": 1, "pattern": r"[\s\S]*\S[\s\S]*",
                     "description": "Short completion summary; full text belongs in the artifact."},
         "metadata": {"type": "object", "properties": {key: artifact},
                      "required": [key], "additionalProperties": False}},
