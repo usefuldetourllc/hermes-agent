@@ -175,6 +175,13 @@ def run_tool_round(
                     agent.stream_delta_callback(None)
         return _verdict("break")
 
+    from agent.kanban_stop import owned_terminal_response
+    terminal = owned_terminal_response()
+    if terminal is not None:
+        final_response = terminal
+        _turn_exit_reason = "kanban_terminal"
+        return _verdict("break")
+
     # Reset per-turn retry counters so one truncation can't poison the turn.
     truncated_tool_call_retries = 0
     # Defer the paragraph break: _fire_stream_delta() prepends one "\n\n" when real

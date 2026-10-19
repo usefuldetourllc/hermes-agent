@@ -1,7 +1,8 @@
 """Turn-end guard for kanban workers, which must end with ``kanban_complete`` or
 ``kanban_block``. Some models narrate the next step and stop with no tool calls;
 Hermes treats that as a clean exit → ``rc=0`` → dispatcher ``protocol_violation``.
-Policy-only: return a bounded synthetic nudge so the loop continues instead of exiting.
+An owned durable terminal handoff ends inference; an unfinished worker may receive
+a bounded synthetic nudge so it records a handoff before exiting.
 """
 
 from __future__ import annotations
@@ -15,6 +16,32 @@ from agent.delegation_context import owned_kanban_task
 _TERMINAL_KANBAN_TOOLS = frozenset({"kanban_complete", "kanban_block"})
 
 _DEFAULT_MAX_ATTEMPTS = 2
+
+
+def owned_terminal_response() -> Optional[str]:
+    """Stop inference after this worker's durable terminal transition.
+
+    A successful tool call already persisted the handoff. Asking the model to
+    narrate it again can mutate a closed task or exhaust the remaining budget.
+    This ends only inference; the supervisor still owns process cleanup and the
+    external result verifier still decides whether the handoff is acceptable.
+    """
+    task_id = owned_kanban_task()
+    run_id = os.environ.get("HERMES_KANBAN_RUN_ID", "")
+    claim = os.environ.get("HERMES_KANBAN_CLAIM_LOCK", "")
+    if not task_id or not run_id.isdecimal() or not claim:
+        return None
+    from hermes_cli import kanban_db_connect as kbc
+    with kbc.connect_closing() as conn:
+        row = conn.execute(
+            """SELECT status,summary FROM task_runs WHERE id=? AND task_id=?
+            AND claim_lock=? AND ended_at IS NOT NULL
+            AND status IN ('done','blocked','review')""",
+            (int(run_id), task_id, claim),
+        ).fetchone()
+    if row is None:
+        return None
+    return row['summary'] or f"Kanban task {task_id} recorded as {row['status']}."
 
 
 def kanban_stop_nudge_enabled() -> bool:
@@ -80,4 +107,5 @@ def build_kanban_stop_nudge(
     )
 
 
-__all__ = ["build_kanban_stop_nudge", "kanban_stop_nudge_enabled", "session_called_kanban_terminal"]
+__all__ = ["build_kanban_stop_nudge", "kanban_stop_nudge_enabled", "session_called_kanban_terminal",
+           "owned_terminal_response"]
