@@ -48,24 +48,27 @@ def completion_parameters(value: str, task_id: str) -> dict:
     metadata_json/result callers remain readable at the database boundary.
     """
     contract = parse_contract(value)
-    fixed = {**contract["identity"], "task_id": task_id, "complete": True,
-             "truncated": False, "evidence_source": contract["evidence_source"]}
-    types = {str: "string", int: "integer", bool: "boolean"}
-    properties = {k: {"type": types[type(v)], "enum": [v]} for k, v in fixed.items()}
-    # Accept full prose even when a constrained decoder anchors the pattern.
-    properties["text"] = {"type": "string", "minLength": 1, "pattern": r"[\s\S]*\S[\s\S]*",
-                          "maxLength": contract["max_characters"],
-                          "description": "Full artifact text, distinct from the short summary."}
-    artifact = {"type": "object", "properties": properties,
-                "required": list(properties), "additionalProperties": False}
-    key = contract["metadata_key"]
+    # Identity belongs to the immutable task contract, not to model-generated JSON.
     return {"type": "object", "properties": {
         "task_id": {"type": "string", "enum": [task_id]},
         "summary": {"type": "string", "minLength": 1, "pattern": r"[\s\S]*\S[\s\S]*",
-                    "description": "Short completion summary; full text belongs in the artifact."},
-        "metadata": {"type": "object", "properties": {key: artifact},
-                     "required": [key], "additionalProperties": False}},
-        "required": ["task_id", "summary", "metadata"], "additionalProperties": False}
+                    "description": "Short completion summary, distinct from the full text."},
+        "text": {"type": "string", "minLength": 1, "pattern": r"[\s\S]*\S[\s\S]*",
+                 "maxLength": contract["max_characters"],
+                 "description": "The entire final artifact. Write concise complete prose directly here."}},
+        "required": ["task_id", "summary", "text"], "additionalProperties": False}
+
+
+def metadata_from_text(value: str, task_id: str, text: str) -> dict:
+    """Bind explicit model-authored text to the task's existing source identity.
+
+    complete_task still validates this artifact under its terminal-mutation lock.
+    No file, comment, prior run, or summary is used to reconstruct missing text.
+    """
+    contract = parse_contract(value)
+    return {contract["metadata_key"]: {**contract["identity"], "task_id": task_id,
+        "complete": True, "truncated": False, "evidence_source": contract["evidence_source"],
+        "text": text}}
 
 
 def require_artifact(conn, task_id: str, metadata: dict | None, summary: str | None) -> None:

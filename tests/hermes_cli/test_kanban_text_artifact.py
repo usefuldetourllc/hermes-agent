@@ -138,12 +138,12 @@ def test_model_wire_schema_is_task_bound_stable_and_enforces_complete_handoff(tm
             artifact = {**json.loads(contract().split(":",1)[1])["identity"], "task_id":tid,
                 "complete":True,"truncated":False,"evidence_source":"hermes_completion_metadata",
                 "text":"Complete advice.\nUnicode: café"}
-            valid = {"task_id":tid,"summary":"Advice ready","metadata":{"advice_artifact":artifact}}
-            invalid = [{}, {"summary":"Ready"}, {**valid,"summary":" "}, {**valid,"metadata":{}},
-                {**valid,"metadata":{"advice_artifact":{}}}]
-            for key, value in (("task_id","wrong"),("source_revision_key","wrong"),
-                               ("text","x"*41),("text"," "),("truncated",True)):
-                invalid.append({**valid,"metadata":{"advice_artifact":{**artifact,key:value}}})
+            valid = {"task_id":tid,"summary":"Advice ready","text":artifact["text"]}
+            invalid = [{}, {"summary":"Ready"}, {**valid,"summary":" "},
+                {**valid,"task_id":"wrong"}, {**valid,"text":"x"*41},
+                {**valid,"text":" "}, {**valid,"text":{}},
+                {**valid,"metadata":{"advice_artifact":{**artifact,"source_revision_key":"wrong"}}},
+                {**valid,"metadata_json":json.dumps({"advice_artifact":artifact})}]
             for args in invalid:
                 assert list(validator.iter_errors(args)), args
                 assert "error" in json.loads(registry.dispatch("kanban_complete",args))
@@ -151,7 +151,7 @@ def test_model_wire_schema_is_task_bound_stable_and_enforces_complete_handoff(tm
             # Some constrained decoders compile JSON Schema patterns as whole-string
             # grammars. Both interpretations must allow the entire multiline prose.
             for field, text in [(schema["properties"]["summary"], valid["summary"]),
-                                (schema["properties"]["metadata"]["properties"]["advice_artifact"]["properties"]["text"], artifact["text"])]:
+                                (schema["properties"]["text"], artifact["text"])]:
                 assert re.fullmatch(field["pattern"], text), text
             validator.validate(valid)
             assert json.loads(registry.dispatch("kanban_complete",valid))["ok"]

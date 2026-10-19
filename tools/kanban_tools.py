@@ -605,24 +605,31 @@ def _handle_complete(args: dict, **kw) -> str:
     tid = _worker_guard("kanban_complete", args)
     summary = _redact_opt(args.get("summary"))
     result = _redact_opt(args.get("result"))
-    metadata = _handoff_metadata(args)
-    if isinstance(metadata, dict):
-        # Keep the unredacted dict if the redacted JSON cannot be re-parsed.
-        metadata = _redact_metadata(metadata) or metadata
     created_cards = _coerce_str_list(
         args.get("created_cards"), "created_cards", "task ids", strip=True)
     artifacts = _coerce_str_list(args.get("artifacts"), "artifacts", "file paths", strip=True)
-    if artifacts:
-        metadata = _merge_artifacts(metadata, artifacts)
     _check((summary or '').strip() or (result or '').strip(),
            "provide at least one of: summary (preferred), result")
-    _require_dict_metadata(metadata)
-    metadata = _stamp_worker_session_metadata(tid, metadata)
     with _board(args.get("board")) as (kb, conn):
         # Goal-mode pre-completion judge gate (Issue #38367). Prevent workers from bypassing the auxiliary
         # judge by calling kanban_complete before acceptance criteria are met. Only enforce when a judge is
         # actually reachable — see _goal_judge_available for why an unavailable judge fails open.
         task = kb.get_task(conn, tid)
+        if "text" in args:
+            _check("metadata" not in args and "metadata_json" not in args,
+                   "provide text or metadata, not both")
+            _check(task is not None, f"task {tid} not found")
+            from hermes_cli.kanban_text_artifact import metadata_from_text
+            metadata = metadata_from_text(task.completion_contract, tid, args["text"])
+        else:
+            metadata = _handoff_metadata(args)
+        if isinstance(metadata, dict):
+            # Keep the unredacted dict if the redacted JSON cannot be re-parsed.
+            metadata = _redact_metadata(metadata) or metadata
+        if artifacts:
+            metadata = _merge_artifacts(metadata, artifacts)
+        _require_dict_metadata(metadata)
+        metadata = _stamp_worker_session_metadata(tid, metadata)
         _goal_gate("kanban_complete", task, tid, (summary or result or "").strip())
         try:
             ok = kb.complete_task(
