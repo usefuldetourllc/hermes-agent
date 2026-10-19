@@ -96,6 +96,7 @@ def test_contract_cannot_be_substituted_or_bypassed_by_direct_completion(tmp_pat
 
 def test_model_wire_schema_is_task_bound_stable_and_enforces_complete_handoff(tmp_path, monkeypatch):
     import httpx
+    import re
     from openai import OpenAI
     from jsonschema import Draft202012Validator
     from model_tools import get_tool_definitions
@@ -136,7 +137,7 @@ def test_model_wire_schema_is_task_bound_stable_and_enforces_complete_handoff(tm
             validator = Draft202012Validator(schema)
             artifact = {**json.loads(contract().split(":",1)[1])["identity"], "task_id":tid,
                 "complete":True,"truncated":False,"evidence_source":"hermes_completion_metadata",
-                "text":"Complete source-bound advice"}
+                "text":"Complete advice.\nUnicode: café"}
             valid = {"task_id":tid,"summary":"Advice ready","metadata":{"advice_artifact":artifact}}
             invalid = [{}, {"summary":"Ready"}, {**valid,"summary":" "}, {**valid,"metadata":{}},
                 {**valid,"metadata":{"advice_artifact":{}}}]
@@ -147,6 +148,41 @@ def test_model_wire_schema_is_task_bound_stable_and_enforces_complete_handoff(tm
                 assert list(validator.iter_errors(args)), args
                 assert "error" in json.loads(registry.dispatch("kanban_complete",args))
                 assert kb.get_task(conn, tid).status == "running"
+            # Some constrained decoders compile JSON Schema patterns as whole-string
+            # grammars. Both interpretations must allow the entire multiline prose.
+            for field, text in [(schema["properties"]["summary"], valid["summary"]),
+                                (schema["properties"]["metadata"]["properties"]["advice_artifact"]["properties"]["text"], artifact["text"])]:
+                assert re.fullmatch(field["pattern"], text), text
             validator.validate(valid)
             assert json.loads(registry.dispatch("kanban_complete",valid))["ok"]
             assert kb.latest_run(conn, tid).metadata["advice_artifact"] == artifact
+
+
+def test_generic_completion_schema_accepts_full_prose_without_blank_handoffs(tmp_path, monkeypatch):
+    import re
+    from jsonschema import Draft202012Validator
+    from tools.kanban_tools_schemas import KANBAN_COMPLETE_SCHEMA
+    from tools.registry import registry
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+    monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
+    kb.init_db()
+    with connect() as conn:
+        for field in ("summary", "result"):
+            tid = kb.create_task(conn, title="Ordinary completion", assignee="architecture")
+            assert kb.claim_task(conn, tid)
+            monkeypatch.setenv("HERMES_KANBAN_TASK", tid)
+            schema = KANBAN_COMPLETE_SCHEMA["parameters"]
+            validator = Draft202012Validator(schema)
+            prose = "Completed the requested task.\nVerified Unicode: café 終.\n"
+            args = {"task_id": tid, field: prose}
+            pattern = next(option["properties"][field]["pattern"] for option in schema["anyOf"]
+                           if field in option["properties"])
+            assert re.fullmatch(pattern, prose)
+            validator.validate(args)
+            for blank in ("", " ", "\n\t"):
+                assert list(validator.iter_errors({"task_id": tid, field: blank}))
+            assert json.loads(registry.dispatch("kanban_complete", args))["ok"]
+            assert kb.latest_run(conn, tid).summary == prose
